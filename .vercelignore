@@ -1,0 +1,10 @@
+.git
+.next
+node_modules
+coverage
+/reports
+/qa-screenshots
+/docs/outreach
+*.mov
+*.mp4
+.env*

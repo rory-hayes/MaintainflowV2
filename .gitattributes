@@ -1,0 +1,2 @@
+docs/outreach/demo-recordings/*.mp4 filter=lfs diff=lfs merge=lfs -text
+docs/outreach/demo-recordings/*.m4v filter=lfs diff=lfs merge=lfs -text
