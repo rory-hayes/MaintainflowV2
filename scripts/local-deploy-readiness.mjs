@@ -99,7 +99,7 @@ const optionalEnvKeys = [
 
 const results = []
 
-checkFile(".env.local", ".env.local exists")
+checkEnvironmentSource()
 checkFile("supabase/maintainflow_schema.sql", "Supabase schema SQL exists")
 checkFile("supabase/maintainflow_scheduler.sql", "Supabase scheduler SQL exists")
 checkFile("supabase/maintainflow_scheduler_verify.sql", "Supabase scheduler verification SQL exists")
@@ -115,7 +115,7 @@ checkStripeBillingEnv()
 checkCommand("git", ["--version"], "Git is available")
 const ghAvailable = checkCommand("gh", ["--version"], "GitHub CLI is available", { optional: true })
 if (ghAvailable) checkGhAuth()
-const vercelAvailable = checkCommand("vercel", ["--version"], "Vercel CLI is available for scripted env pushes", {
+const vercelAvailable = checkCommand("pnpm", ["dlx", "vercel@56.3.2", "--version"], "Pinned Vercel CLI is available for scripted env pushes", {
   optional: true,
 })
 if (vercelAvailable) checkVercelAuth()
@@ -142,6 +142,19 @@ if (blockers.length) {
 
 function checkFile(path, message) {
   add(existsSync(path) ? "OK" : "BLOCK", existsSync(path) ? message : `${message}: missing`)
+}
+
+function checkEnvironmentSource() {
+  const localEnvExists = existsSync(".env.local")
+  const requiredEnvironmentInjected = requiredEnvKeys.every((key) => Boolean(process.env[key]))
+  add(
+    localEnvExists || requiredEnvironmentInjected ? "OK" : "BLOCK",
+    localEnvExists
+      ? ".env.local exists"
+      : requiredEnvironmentInjected
+        ? "Required environment is securely injected without .env.local"
+        : ".env.local is missing and the required environment is not injected"
+  )
 }
 
 function checkRequiredEnv() {
@@ -489,7 +502,7 @@ function checkGhAuth() {
 }
 
 function checkVercelAuth() {
-  const result = spawnSync("vercel", ["whoami"], { encoding: "utf8" })
+  const result = spawnSync("pnpm", ["dlx", "vercel@56.3.2", "whoami"], { encoding: "utf8" })
   add(result.status === 0 ? "OK" : "BLOCK", "Vercel CLI authentication is valid")
 }
 
