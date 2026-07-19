@@ -21,8 +21,12 @@ export function deriveIdempotentReportShareToken(input: {
 
 export function hashReportShareToken(token: string, pepper: string) {
   if (pepper.trim().length < 32) throw new Error("REPORT_SHARE_TOKEN_PEPPER must contain at least 32 characters.")
-  if (!/^[A-Za-z0-9_-]{32,100}$/.test(token)) throw new Error("The report share token is malformed.")
+  if (!isReportShareToken(token)) throw new Error("The report share token is malformed.")
   return createHash("sha256").update(`${pepper}:${token}`).digest("hex")
+}
+
+export function isReportShareToken(token: string) {
+  return /^[A-Za-z0-9_-]{32,100}$/.test(token)
 }
 
 export function hashReportSnapshot(snapshot: unknown) {

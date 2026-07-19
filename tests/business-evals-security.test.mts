@@ -31,6 +31,7 @@ import {
   createReportShareToken,
   deriveIdempotentReportShareToken,
   hashReportShareToken,
+  isReportShareToken,
   reportSafeScreenshotIds,
   redactSharedReportSnapshot,
   reportShareExpiry,
@@ -381,6 +382,9 @@ test("customer-owned cleanup hooks use a platform-verifiable Ed25519 signature",
 test("report share links store only a peppered hash and redact private diagnostics", () => {
   const token = createReportShareToken()
   const hash = hashReportShareToken(token, "report-share-token-pepper-with-at-least-thirty-two-chars")
+  assert.equal(isReportShareToken(token), true)
+  assert.equal(isReportShareToken("not-a-valid-token"), false)
+  assert.equal(isReportShareToken(`${"a".repeat(32)}?private=query`), false)
   assert.match(token, /^[A-Za-z0-9_-]+$/)
   assert.match(hash, /^[a-f0-9]{64}$/)
   assert.doesNotMatch(hash, new RegExp(token))

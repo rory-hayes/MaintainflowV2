@@ -8,6 +8,7 @@ import {
   deriveIdempotentReportShareToken,
   hashReportShareToken,
   hashReportSnapshot,
+  isReportShareToken,
   reportSafeScreenshotIds,
   reportShareExpiry,
 } from "@/lib/reports/share-links"
@@ -179,6 +180,9 @@ export async function loadSharedReportEvidence(token: string, artifactId: string
 }
 
 async function resolveSharedReport(token: string) {
+  if (!isReportShareToken(token)) {
+    throw new BusinessEvalsApiError(404, "SHARE_LINK_NOT_FOUND", "This report link is invalid, expired or revoked.")
+  }
   const tokenHash = hashReportShareToken(token, getSharePepper())
   const links = await supabaseServiceJson<Row[]>("rpc/consume_report_share_link", {
     method: "POST",

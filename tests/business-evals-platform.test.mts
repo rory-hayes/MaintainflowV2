@@ -149,6 +149,7 @@ test("project and journey creation enforce plan limits inside locked database tr
 test("public report access consumes only a current hashed share link", () => {
   const sharing = readFileSync("src/lib/api/report-sharing.server.ts", "utf8")
   assert.match(sharing, /hashReportShareToken/)
+  assert.match(sharing, /if \(!isReportShareToken\(token\)\)[\s\S]*?SHARE_LINK_NOT_FOUND/)
   assert.match(sharing, /resolution=ignore-duplicates,return=representation/)
   assert.doesNotMatch(sharing, /resolution=merge-duplicates/)
   assert.match(sharing, /SHARE_LINK_REVOKED/)
