@@ -73,5 +73,9 @@ jobs:
       - name: Test Business Evals journeys
         run: pnpm test:business-evals:e2e
 
-      - name: Build
+      - name: Build canary route tree
+        env:
+          NEXT_PUBLIC_BUSINESS_EVALS_UI: "false"
+          BUSINESS_EVALS_WORKSPACE_ALLOWLIST: "00000000-0000-4000-8000-000000000099"
+          BUSINESS_EVALS_PREVIEW: "0"
         run: pnpm build

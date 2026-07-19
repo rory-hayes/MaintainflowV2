@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 
 const adapters = readFileSync("src/components/evals/api-adapters.ts", "utf8")
+const ciWorkflow = readFileSync(".github/workflows/ci.yml", "utf8")
+const evalsLayout = readFileSync("src/app/(evals)/layout.tsx", "utf8")
+const conditionalRoute = readFileSync("src/components/evals/evals-conditional-route.tsx", "utf8")
+const evalsRouteFallback = readFileSync("src/components/evals/evals-route-fallback.tsx", "utf8")
 const routeQueries = readFileSync("src/components/evals/use-route-scoped-evals.ts", "utf8")
 const boundary = readFileSync("src/components/evals/evals-route-boundary.tsx", "utf8")
 const provider = readFileSync("src/components/evals/evals-provider.tsx", "utf8")
@@ -16,6 +20,16 @@ const resumeRoute = readFileSync("src/app/api/journeys/[id]/resume/route.ts", "u
 const journeyServer = readFileSync("src/lib/api/journeys.server.ts", "utf8")
 const migration = readFileSync("supabase/maintainflow_business_evals_migration.sql", "utf8")
 const previewE2e = readFileSync("tests/e2e/business-evals-preview.spec.ts", "utf8")
+
+test("query-driven eval routes are enclosed by a server Suspense boundary", () => {
+  assert.match(evalsLayout, /import \{ Suspense, type ReactNode \} from "react"/)
+  assert.match(evalsLayout, /<Suspense fallback=\{<EvalsRouteFallback \/>\}>[\s\S]*?<EvalsRouteBoundary/)
+  assert.match(conditionalRoute, /import \{ Suspense, type ReactNode \} from "react"/)
+  assert.equal(conditionalRoute.match(/<Suspense fallback=\{<EvalsRouteFallback \/>\}>/g)?.length, 2)
+  assert.match(evalsRouteFallback, /aria-busy="true"/)
+  assert.match(ciWorkflow, /name: Build canary route tree[\s\S]*?NEXT_PUBLIC_BUSINESS_EVALS_UI: "false"/)
+  assert.match(ciWorkflow, /BUSINESS_EVALS_WORKSPACE_ALLOWLIST: "00000000-0000-4000-8000-000000000099"/)
+})
 
 test("authenticated eval UI uses route-scoped cursor pages instead of a five-collection workspace mirror", () => {
   assert.doesNotMatch(adapters, /limit=100|loadProductionEvalsData/)
