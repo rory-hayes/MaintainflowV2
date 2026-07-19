@@ -13,6 +13,7 @@ const provider = readFileSync("src/components/evals/evals-provider.tsx", "utf8")
 const runsPage = readFileSync("src/components/evals/pages/eval-runs-pages.tsx", "utf8")
 const builder = readFileSync("src/components/evals/pages/journeys-pages.tsx", "utf8")
 const journeyDetail = readFileSync("src/components/evals/pages/journey-detail-page.tsx", "utf8")
+const legacyRouteRedirect = readFileSync("src/components/evals/legacy-route-redirect.tsx", "utf8")
 const shell = readFileSync("src/components/evals/evals-app-shell.tsx", "utf8")
 const journeyRoute = readFileSync("src/app/api/journeys/route.ts", "utf8")
 const incidentRoute = readFileSync("src/app/api/incidents/route.ts", "utf8")
@@ -29,6 +30,8 @@ test("query-driven eval routes are enclosed by a server Suspense boundary", () =
   assert.match(evalsRouteFallback, /aria-busy="true"/)
   assert.match(ciWorkflow, /name: Build canary route tree[\s\S]*?NEXT_PUBLIC_BUSINESS_EVALS_UI: "false"/)
   assert.match(ciWorkflow, /BUSINESS_EVALS_WORKSPACE_ALLOWLIST: "00000000-0000-4000-8000-000000000099"/)
+  assert.match(legacyRouteRedirect, /aria-label="Loading Maintain Flow"/)
+  assert.doesNotMatch(legacyRouteRedirect, /Checking workspace access/)
 })
 
 test("authenticated eval UI uses route-scoped cursor pages instead of a five-collection workspace mirror", () => {

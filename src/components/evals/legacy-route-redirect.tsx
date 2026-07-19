@@ -28,6 +28,6 @@ export function LegacyRouteRedirect({ destination, children }: { destination: st
     return () => { active = false }
   }, [destination, ready, router, user])
 
-  if (!ready || checking) return <main className="flex min-h-dvh items-center justify-center bg-[#fbfaf7]"><span className="flex items-center gap-2 text-sm text-slate-500"><Spinner className="size-4" />Checking workspace access</span></main>
+  if (!ready || checking) return <main className="flex min-h-dvh items-center justify-center bg-[#fbfaf7]" aria-busy="true" aria-label="Loading Maintain Flow"><span className="flex items-center gap-2 text-sm text-slate-500"><Spinner className="size-4" />Loading Maintain Flow</span></main>
   return children
 }
