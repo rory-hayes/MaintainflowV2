@@ -6,6 +6,9 @@ Do not commit real secrets.
 NEXT_PUBLIC_APP_URL=https://www.maintainflow.io
 NEXT_PUBLIC_SITE_URL=https://www.maintainflow.io
 VERCEL_TEAM_SLUG=rorys-projects-accf0d71
+VERCEL_PROJECT_ID=prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE
+# For the selected-workspace canary only, use https://maintainflow-v2.vercel.app
+# for both public URL values. Restore the canonical www origin before launch.
 
 # Local QA
 # Set to local when you need browser-only auth/data while real Supabase keys remain in .env.local.

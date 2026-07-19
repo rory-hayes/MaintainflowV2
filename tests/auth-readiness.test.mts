@@ -50,3 +50,28 @@ test("deploy auth readiness rejects a non-canonical production redirect origin",
 
   assert.equal(results.some((result) => result.level === "BLOCK" && /NEXT_PUBLIC_SITE_URL/.test(result.message)), true)
 })
+
+test("canary auth readiness keeps auth and billing on the isolated V2 deployment", () => {
+  const canaryConfiguration = {
+    ...completeAuthConfiguration,
+    NEXT_PUBLIC_SITE_URL: "https://maintainflow-v2.vercel.app",
+    NEXT_PUBLIC_APP_URL: "https://maintainflow-v2.vercel.app",
+  }
+
+  const canaryResults = evaluateSupabaseAuthReadiness(canaryConfiguration, { releaseStage: "canary" })
+  assert.equal(canaryResults.some((result) => result.level === "BLOCK"), false)
+  assert.match(canaryResults.map((result) => result.message).join("\n"), /isolated V2 canary origin/)
+
+  const legacyRedirectResults = evaluateSupabaseAuthReadiness(completeAuthConfiguration, { releaseStage: "canary" })
+  assert.equal(
+    legacyRedirectResults.filter((result) => result.level === "BLOCK" && /NEXT_PUBLIC_(?:SITE|APP)_URL/.test(result.message)).length,
+    2
+  )
+})
+
+test("auth readiness rejects an unknown release stage", () => {
+  assert.throws(
+    () => evaluateSupabaseAuthReadiness(completeAuthConfiguration, { releaseStage: "preview" }),
+    /releaseStage must be canary or launch/
+  )
+})

@@ -19,7 +19,12 @@ Do not continue from an older green run after changing the source or environment
 1. Create or select the production project.
 2. Apply `supabase/maintainflow_schema.sql` for a new project. For an existing project, follow the documented expand/contract migration sequence.
 3. Create private `maintainflow-reports` and `maintainflow-eval-evidence` buckets and verify that authenticated users cannot read or mutate objects directly.
-4. Configure the canonical site URL and exact confirmation, recovery and Google OAuth redirects for `https://www.maintainflow.io`.
+4. Keep the Supabase Site URL canonical at `https://www.maintainflow.io`. Allowlist these exact application redirects before attesting redirects:
+   - `https://www.maintainflow.io/auth/callback`
+   - `https://www.maintainflow.io/reset-password`
+   - `https://maintainflow-v2.vercel.app/auth/callback`
+   - `https://maintainflow-v2.vercel.app/reset-password`
+   The V2 entries are required for confirmation, recovery and Google OAuth during the isolated canary; do not replace the canonical Site URL with the canary origin.
 5. Configure the verified Maintain Flow SMTP sender and approved confirmation/reset templates.
 6. Record the Supabase Auth readiness variables, including `SUPABASE_AUTH_GOOGLE_OAUTH_CONFIRMED=true`, only after isolated confirmation, recovery and Google OAuth tests pass. Google client credentials stay in Supabase and are not copied to Vercel.
 
@@ -40,6 +45,8 @@ Create stable Solo, Team and Agency Prices for both monthly and annual billing. 
 Use a production-owned canary workspace while the global UI remains off:
 
 ```txt
+NEXT_PUBLIC_APP_URL=https://maintainflow-v2.vercel.app
+NEXT_PUBLIC_SITE_URL=https://maintainflow-v2.vercel.app
 NEXT_PUBLIC_BUSINESS_EVALS_UI=false
 BUSINESS_EVALS_WORKSPACE_ALLOWLIST=<canary-workspace-uuid>
 BUSINESS_EVALS_RUNNER_ENABLED=true
@@ -58,13 +65,15 @@ pnpm vercel:env:check:canary
 pnpm vercel:env:push:canary
 ```
 
-Deploy to the production Vercel project without moving public DNS. Against the Vercel deployment URL, prove both controlled templates, inbound email, verification-link allowlisting, required cleanup, a scheduled run, an Incident recovery, a PDF, an expiring/revocable share link, outbound alerts and Stripe test checkout/portal. Keep the scheduler kill switch available throughout.
+Deploy to the production Vercel project without moving public DNS. First run `pnpm smoke:canary` and require an unauthenticated application response on the stable `https://maintainflow-v2.vercel.app` production domain, including reachable Resend and Stripe webhook routes that reject unsigned requests. Do not use a protected unique deployment URL for provider callbacks. Then prove both controlled templates, inbound email, verification-link allowlisting, required cleanup, a scheduled run, an Incident recovery, a PDF, an expiring/revocable share link, outbound alerts and Stripe test checkout/portal. Keep the scheduler kill switch available throughout.
 
 ## 6. Open the global release
 
 After the canary evidence is saved, replace every Stripe test-mode value with its verified live-mode counterpart. Then:
 
 ```txt
+NEXT_PUBLIC_APP_URL=https://www.maintainflow.io
+NEXT_PUBLIC_SITE_URL=https://www.maintainflow.io
 NEXT_PUBLIC_BUSINESS_EVALS_UI=true
 BUSINESS_EVALS_WORKSPACE_ALLOWLIST=
 BUSINESS_EVALS_FIXTURES_ENABLED=false
@@ -78,7 +87,17 @@ pnpm vercel:env:check
 pnpm vercel:env:push
 ```
 
-Deploy the exact verified commit. Run the production smoke and cross-tenant denial checks on the Vercel hostname. Only then point `www.maintainflow.io`, verify HTTPS and the intended apex/www redirect, and repeat signup, first Lead form proof, report sharing and billing smoke tests on the canonical domain.
+The launch push updates existing production values in place and removes the canary workspace allowlist and fixture-only secrets. Do not treat an existing Vercel variable as success unless its reviewed launch value was actually written.
+
+Deploy the exact verified commit. Before DNS moves, run the launch artifact smoke against the Vercel hostname while still requiring canonical `www` metadata:
+
+```sh
+SMOKE_PRODUCTION_URL=https://maintainflow-v2.vercel.app \
+SMOKE_ALLOW_NONCANONICAL_TARGET=1 \
+pnpm smoke:production
+```
+
+Run the cross-tenant denial checks there as well. Only then point `www.maintainflow.io`, verify HTTPS and the intended apex/www redirect, and repeat signup, first Lead form proof, report sharing and billing smoke tests on the canonical domain.
 
 ## Launch evidence required
 

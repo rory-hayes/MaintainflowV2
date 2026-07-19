@@ -17,6 +17,7 @@
     "test:business-evals:database": "node scripts/business-evals-database-acceptance.mjs",
     "smoke:cron": "node scripts/smoke-cron.mjs",
     "smoke:production": "node scripts/production-smoke.mjs",
+    "smoke:canary": "node scripts/production-smoke.mjs --stage=canary",
     "smoke:production:supabase": "node --experimental-strip-types scripts/live-assurance-supabase-smoke.mjs",
     "deploy:check": "node scripts/local-deploy-readiness.mjs",
     "deploy:check:canary": "node scripts/local-deploy-readiness.mjs --stage=canary",

@@ -8,6 +8,15 @@ const env = {
   ...readEnvFile(".env.local"),
   ...process.env,
 }
+const lockedVercelProjectId = "prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE"
+const lockedVercelTeamSlug = "rorys-projects-accf0d71"
+
+if (env.VERCEL_PROJECT_ID && env.VERCEL_PROJECT_ID !== lockedVercelProjectId) {
+  throw new Error(`VERCEL_PROJECT_ID must be the locked Maintain Flow V2 project ${lockedVercelProjectId}.`)
+}
+if (env.VERCEL_TEAM_SLUG && env.VERCEL_TEAM_SLUG !== lockedVercelTeamSlug) {
+  throw new Error(`VERCEL_TEAM_SLUG must be the locked Maintain Flow V2 team ${lockedVercelTeamSlug}.`)
+}
 
 if (process.argv.includes("--all")) {
   throw new Error("Bulk environment publishing is disabled. Maintain Flow production credentials must not be copied into Preview or Development.")
@@ -161,7 +170,11 @@ const optionalKeys = [
   "OPS_ADMIN_EMAILS",
 ]
 
-const keys = [...new Set([...requiredKeys, ...optionalKeys])].filter((key) => env[key])
+const keysToRemove = releaseStage === "launch"
+  ? ["BUSINESS_EVALS_WORKSPACE_ALLOWLIST", "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET", "BUSINESS_EVALS_FIXTURE_FROM_EMAIL"]
+  : []
+const keys = [...new Set([...requiredKeys, ...optionalKeys])]
+  .filter((key) => env[key] && !keysToRemove.includes(key))
 const missing = requiredKeys.filter((key) => !env[key])
 if (missing.length) {
   throw new Error(`Missing required env vars in .env.local: ${missing.join(", ")}`)
@@ -177,44 +190,61 @@ if (dryRun) {
   console.log(`Required keys present: ${requiredKeys.join(", ")}`)
   console.log(`Optional keys present: ${presentOptionalKeys.length ? presentOptionalKeys.join(", ") : "none"}`)
   console.log(`Optional keys missing: ${missingOptionalKeys.length ? missingOptionalKeys.join(", ") : "none"}`)
+  console.log(`Keys removed for this stage: ${keysToRemove.length ? keysToRemove.join(", ") : "none"}`)
   console.log("Stripe Customer Portal activation keys are scoped to production.")
   console.log("No values were printed and nothing was sent to Vercel.")
   process.exit(0)
 }
 
-if (spawnSync("vercel", ["--version"], { encoding: "utf8" }).status !== 0) {
-  throw new Error("Vercel CLI is not installed or not on PATH. Install/login, then rerun this script.")
+if (runVercel(["--version"]).status !== 0) {
+  throw new Error("The pinned Vercel CLI could not start. Install pnpm dependencies, then rerun this script.")
 }
 
 const projectArgs = [
+  "--project",
+  lockedVercelProjectId,
   "--scope",
-  env.VERCEL_TEAM_SLUG || "rorys-projects-accf0d71",
+  lockedVercelTeamSlug,
 ]
 
-console.log(`Pushing ${keys.length} env vars to Vercel environments: ${environments.join(", ")}`)
+console.log(`Upserting ${keys.length} env vars in Vercel environments: ${environments.join(", ")}`)
 console.log("Values are piped to Vercel and are not printed.")
+
+for (const key of keysToRemove) {
+  for (const environment of environments) {
+    const result = runVercel(["env", "remove", key, environment, "--yes", ...projectArgs])
+    const output = `${result.stdout}\n${result.stderr}`
+    if (result.status === 0) {
+      console.log(`Removed ${key} from ${environment}.`)
+      continue
+    }
+    if (/not found|does not exist/i.test(output)) {
+      console.log(`${key} is already absent from ${environment}.`)
+      continue
+    }
+    throw new Error(`Failed to remove ${key} from ${environment}: ${redact(output)}`)
+  }
+}
 
 for (const key of keys) {
   for (const environment of environments) {
-    const result = spawnSync("vercel", ["env", "add", key, environment, ...projectArgs], {
-      input: `${env[key]}\n`,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    })
+    const result = runVercel(["env", "add", key, environment, "--force", "--yes", ...projectArgs], `${env[key]}\n`)
 
     if (result.status === 0) {
-      console.log(`Added ${key} to ${environment}.`)
+      console.log(`Upserted ${key} in ${environment}.`)
       continue
     }
 
-    const output = `${result.stdout}\n${result.stderr}`
-    if (/already exists/i.test(output)) {
-      console.log(`${key} already exists in ${environment}. Remove/update it in Vercel, then rerun if needed.`)
-      continue
-    }
-
-    throw new Error(`Failed to add ${key} to ${environment}: ${redact(output)}`)
+    throw new Error(`Failed to upsert ${key} in ${environment}: ${redact(`${result.stdout}\n${result.stderr}`)}`)
   }
+}
+
+function runVercel(args, input) {
+  return spawnSync("pnpm", ["dlx", "vercel@56.3.2", ...args], {
+    input,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  })
 }
 
 function readFlag(name) {
@@ -241,14 +271,26 @@ function readEnvFile(path) {
 }
 
 function redact(value) {
-  return value
+  let redacted = String(value)
+  for (const [key, secret] of Object.entries(env)) {
+    if (
+      /(?:KEY|SECRET|PASSWORD|PEPPER|TOKEN|PRIVATE|ENCRYPTION|DATABASE_URL|SERVICE_ROLE)/.test(key)
+      && typeof secret === "string"
+      && secret.length >= 8
+    ) {
+      redacted = redacted.split(secret).join("[redacted]")
+    }
+  }
+  return redacted
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
-    .replace(/(postgresql:\/\/postgres:)[^@]+@/gi, "$1[redacted]@")
+    .replace(/(postgres(?:ql)?:\/\/[^:/\s]+:)[^@\s]+@/gi, "$1[redacted]@")
     .replace(/(sb_(?:secret|publishable)_[A-Za-z0-9_-]+)/g, "[redacted]")
+    .replace(/(sk-proj-[A-Za-z0-9_-]+)/g, "[redacted]")
     .replace(/(sk_(?:live|test)_[A-Za-z0-9_-]+)/g, "[redacted]")
     .replace(/(rk_(?:live|test)_[A-Za-z0-9_-]+)/g, "[redacted]")
     .replace(/(pk_(?:live|test)_[A-Za-z0-9_-]+)/g, "[redacted]")
     .replace(/(whsec_[A-Za-z0-9_-]+)/g, "[redacted]")
+    .replace(/(re_[A-Za-z0-9_-]{12,})/g, "[redacted]")
 }
 
 function validateBrowserbaseEgressProxy(values) {
@@ -286,7 +328,7 @@ function validateBrowserbaseEgressProxy(values) {
 }
 
 function validateProductionReleaseValues(values, stage) {
-  const authBlockers = evaluateSupabaseAuthReadiness(values).filter((result) => result.level === "BLOCK")
+  const authBlockers = evaluateSupabaseAuthReadiness(values, { releaseStage: stage }).filter((result) => result.level === "BLOCK")
   if (authBlockers.length) throw new Error(`Supabase Auth is not production ready: ${authBlockers.map((result) => result.message).join("; ")}`)
   for (const key of ["SUPABASE_PRODUCTION_PLAN_CONFIRMED", "VERCEL_COMMERCIAL_PLAN_CONFIRMED", "BROWSERBASE_CUSTOM_PROXY_PLAN_CONFIRMED"]) {
     if (values[key] !== "true") throw new Error(`${key} must be true after the provider plan is active and verified.`)

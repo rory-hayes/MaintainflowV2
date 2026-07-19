@@ -1,11 +1,17 @@
 const productionOrigin = "https://www.maintainflow.io"
+const canaryOrigin = "https://maintainflow-v2.vercel.app"
 const expectedPasswordMinimum = "6"
 
-export function evaluateSupabaseAuthReadiness(env) {
+export function evaluateSupabaseAuthReadiness(env, options = {}) {
   const results = []
+  const releaseStage = options.releaseStage || "launch"
+  if (!new Set(["canary", "launch"]).has(releaseStage)) {
+    throw new Error("releaseStage must be canary or launch")
+  }
+  const expectedOrigin = releaseStage === "canary" ? canaryOrigin : productionOrigin
 
-  checkCanonicalUrl(results, env.NEXT_PUBLIC_SITE_URL, "NEXT_PUBLIC_SITE_URL")
-  checkCanonicalUrl(results, env.NEXT_PUBLIC_APP_URL, "NEXT_PUBLIC_APP_URL")
+  checkReleaseUrl(results, env.NEXT_PUBLIC_SITE_URL, "NEXT_PUBLIC_SITE_URL", expectedOrigin, releaseStage)
+  checkReleaseUrl(results, env.NEXT_PUBLIC_APP_URL, "NEXT_PUBLIC_APP_URL", expectedOrigin, releaseStage)
   checkConfirmation(results, env.SUPABASE_AUTH_EMAIL_TEMPLATES_CONFIRMED, "Maintain Flow confirmation and reset email templates")
   checkConfirmation(results, env.SUPABASE_AUTH_SMTP_CONFIRMED, "verified Maintain Flow SMTP sender settings")
   checkConfirmation(results, env.SUPABASE_AUTH_REDIRECTS_CONFIRMED, "production confirmation and recovery redirect settings")
@@ -30,7 +36,7 @@ export function evaluateSupabaseAuthReadiness(env) {
   return results
 }
 
-function checkCanonicalUrl(results, value, key) {
+function checkReleaseUrl(results, value, key, expectedOrigin, releaseStage) {
   let origin = ""
   try {
     const url = new URL(value || "")
@@ -40,10 +46,10 @@ function checkCanonicalUrl(results, value, key) {
   }
 
   results.push({
-    level: origin === productionOrigin ? "OK" : "BLOCK",
-    message: origin === productionOrigin
-      ? `${key} uses the canonical production origin`
-      : `${key} must be ${productionOrigin} for production auth redirects`,
+    level: origin === expectedOrigin ? "OK" : "BLOCK",
+    message: origin === expectedOrigin
+      ? `${key} uses the ${releaseStage === "canary" ? "isolated V2 canary" : "canonical production"} origin`
+      : `${key} must be ${expectedOrigin} for the ${releaseStage} auth and billing flows`,
   })
 }
 

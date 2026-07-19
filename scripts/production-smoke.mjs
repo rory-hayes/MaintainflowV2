@@ -1,10 +1,17 @@
-const defaultBaseUrl = "https://www.maintainflow.io"
-const baseUrl = normalizeBaseUrl(
-  process.env.SMOKE_PRODUCTION_URL ||
-    process.env.PRODUCTION_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    defaultBaseUrl
-)
+const stageArgument = process.argv.find((argument) => argument.startsWith("--stage="))
+const releaseStage = stageArgument ? stageArgument.slice("--stage=".length) : "launch"
+if (!new Set(["canary", "launch"]).has(releaseStage)) {
+  throw new Error("--stage must be canary or launch")
+}
+const defaultBaseUrl = releaseStage === "canary"
+  ? "https://maintainflow-v2.vercel.app"
+  : "https://www.maintainflow.io"
+const baseUrl = normalizeBaseUrl(process.env.SMOKE_PRODUCTION_URL || defaultBaseUrl)
+if (baseUrl !== defaultBaseUrl && process.env.SMOKE_ALLOW_NONCANONICAL_TARGET !== "1") {
+  throw new Error(
+    `The ${releaseStage} smoke target must be ${defaultBaseUrl}. Set SMOKE_ALLOW_NONCANONICAL_TARGET=1 only for an explicit diagnostic run.`
+  )
+}
 const strictProtectedRoutes = process.env.SMOKE_STRICT_PROTECTED_ROUTES === "1"
 const timeoutMs = Number(process.env.SMOKE_TIMEOUT_MS || 15_000)
 
@@ -31,7 +38,7 @@ await checkHtml("/privacy", { status: 200, includes: ["Privacy", "Maintain Flow"
 await checkHtml("/terms", { status: 200, includes: ["Terms", "Maintain Flow"] })
 await checkHtml("/security", { status: 200, includes: ["Security", "Maintain Flow"] })
 await checkText("/robots.txt", { status: 200, includes: ["Sitemap:"] })
-await checkText("/sitemap.xml", { status: 200, includes: ["https://www.maintainflow.io/"] })
+await checkText("/sitemap.xml", { status: 200, includes: [`${defaultBaseUrl}/`] })
 await checkRedirect("/contact-sales", "/sign-up")
 await checkRedirect("/client-journey-assurance", "/sign-up")
 await checkRedirect("/signup", "/sign-up")
@@ -109,6 +116,20 @@ await checkJson("/api/billing/portal", {
     }
   },
 })
+await checkJson("/api/webhooks/resend/inbound", {
+  method: "POST",
+  body: {},
+  status: 401,
+  assert: (body) => {
+    if (body?.ok !== false || body?.error?.code !== "INVALID_SIGNATURE") {
+      throw new Error("Resend webhook did not reject an unsigned request at the public deployment origin")
+    }
+  },
+})
+await checkTextPost("/api/billing/webhook", {
+  status: 400,
+  includes: ["Invalid Stripe webhook signature."],
+})
 await checkJson("/api/contact-sales", {
   method: "POST",
   body: {},
@@ -139,6 +160,7 @@ const failures = checks.filter((check) => check.level === "FAIL")
 const warnings = checks.filter((check) => check.level === "WARN")
 
 console.log("")
+console.log(`Release stage: ${releaseStage}`)
 console.log(`Production smoke target: ${baseUrl}`)
 console.log(`Checks: ${checks.length}`)
 console.log(`Failures: ${failures.length}`)
@@ -196,6 +218,17 @@ async function checkText(path, options) {
   expectExcludes(path, text, options.excludes || [])
   warnExcludes(path, text, options.warnExcludes || [])
   pass(`${path} rendered`)
+}
+
+async function checkTextPost(path, options) {
+  const { response, text } = await request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  })
+  expectStatus(path, response, options.status)
+  expectIncludes(path, text, options.includes || [])
+  pass(`${path} is publicly reachable and rejects an unsigned request`)
 }
 
 async function checkRedirect(path, expectedPath) {

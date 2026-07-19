@@ -480,6 +480,8 @@ test("webhooks reconcile mutable events from current Stripe subscription state",
   assert.match(delegateSource, /billing\/webhook\/route/)
   assert.match(delegateSource, /POST/)
   assert.match(source, /verifyStripeWebhookSignature/)
+  assert.match(source, /if \(!webhookSecret\)[\s\S]+status: 503/)
+  assert.match(source, /secret: webhookSecret/)
   assert.match(source, /checkout\.session\.completed[\s\S]+handleCheckoutCompleted/)
   assert.match(source, /customer\.subscription\.created" \|\| event\.type === "customer\.subscription\.updated"\)[\s\S]+currentSubscription/)
   assert.match(source, /invoice\.payment_failed" \|\| event\.type === "invoice\.paid"\)[\s\S]+currentSubscription\(\{ id: subscriptionId \}\)/)

@@ -178,7 +178,7 @@ function checkSupabaseUrl() {
 }
 
 function checkSupabaseAuthReadiness() {
-  for (const result of evaluateSupabaseAuthReadiness(env)) {
+  for (const result of evaluateSupabaseAuthReadiness(env, { releaseStage })) {
     add(result.level, result.message)
   }
 }

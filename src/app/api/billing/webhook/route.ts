@@ -52,12 +52,18 @@ type StripeObject = {
 
 export async function POST(request: NextRequest) {
   const payload = await request.text()
+  const webhookSecret = getStripeWebhookSecret()
+
+  if (!webhookSecret) {
+    console.error("Stripe webhook is unavailable because its signing secret is not configured.")
+    return new NextResponse("Stripe webhook is not configured.", { status: 503 })
+  }
 
   try {
     verifyStripeWebhookSignature({
       payload,
       signatureHeader: request.headers.get("stripe-signature"),
-      secret: getStripeWebhookSecret(),
+      secret: webhookSecret,
     })
   } catch (error) {
     console.warn("Stripe webhook signature validation failed.", {
