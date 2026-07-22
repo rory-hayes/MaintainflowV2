@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 
+import { MAINTAINFLOW_TERMS_LAST_UPDATED } from "@/lib/legal/acceptance"
+
 export const metadata: Metadata = {
   title: "Terms of Service | Maintain Flow",
   description: "Terms for self-serve Maintain Flow accounts, Business Evals journeys, evidence, and subscriptions.",
@@ -18,6 +20,7 @@ const terms = [
     body: [
       "Maintain Flow is a self-serve Business Evals service for organizations that test customer-facing journeys. A new user may sign up and create one workspace without an application, call, manual invitation, or founder approval.",
       "You must provide accurate account information, keep authentication methods secure, and allow access only to authorized users. You are responsible for activity performed through your workspace and for promptly reporting suspected unauthorized access.",
+      "Creating a self-serve account, continuing through Google, or activating a team invitation requires an explicit, unselected acceptance control for the current Terms and acknowledgement of the current Privacy Policy. Maintain Flow records the exact document versions and server time; it does not treat silence, a preselected control, or an older acceptance as acceptance of a newer document.",
     ],
   },
   {
@@ -98,7 +101,7 @@ export default function TermsPage() {
         <p className="text-sm font-medium text-primary">Maintain Flow Terms</p>
         <h1 className="text-4xl font-medium tracking-tight md:text-5xl">Terms of Service</h1>
         <p className="max-w-2xl text-base leading-7 text-muted-foreground">
-          Last updated: July 18, 2026. These terms cover self-serve accounts, Business Evals journeys, deterministic
+          Last updated: {MAINTAINFLOW_TERMS_LAST_UPDATED}. These terms cover self-serve accounts, Business Evals journeys, deterministic
           verdicts, evidence delivery, legacy endpoint journeys, workspace trials, and subscriptions in Maintain Flow.
         </p>
       </header>

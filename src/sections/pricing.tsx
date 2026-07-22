@@ -54,7 +54,7 @@ export function Pricing() {
               >
                 <div className="flex min-h-7 items-center justify-between gap-3">
                   <h3 className="text-xl font-semibold tracking-tight text-slate-950">{plan.name}</h3>
-                  {highlighted ? <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">Most popular</span> : null}
+                  {highlighted ? <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">Recommended</span> : null}
                 </div>
                 <div className="mt-6 flex items-end gap-1">
                   <span className="text-4xl font-semibold tracking-[-0.05em] text-slate-950">{price.amount}</span>

@@ -2,6 +2,11 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 
+import {
+  createReportPdfStoragePath,
+  isExpectedReportPdfStoragePath,
+} from "../src/lib/supabase/report-storage-path.ts"
+
 const adapters = readFileSync("src/components/evals/api-adapters.ts", "utf8")
 const evalRuns = readFileSync("src/lib/api/eval-runs.server.ts", "utf8")
 const evalRunRoute = readFileSync("src/app/api/eval-runs/route.ts", "utf8")
@@ -83,4 +88,29 @@ test("project paging, server journey filters, workspace-bound reports and Free c
   assert.match(downloadReport, /isBusinessEvalReport\(auth\.workspace\.id, id\)/)
   assert.match(onboarding, /Free includes one browser-only Lead form journey/)
   assert.doesNotMatch(onboarding, /Team trial unlocks browser journeys/)
+})
+
+test("project switcher navigation and public pricing avoid unsupported global-filter and traction claims", () => {
+  const shell = readFileSync("src/components/evals/evals-app-shell.tsx", "utf8")
+  const pricing = readFileSync("src/sections/pricing.tsx", "utf8")
+
+  assert.match(shell, /Open project/)
+  assert.match(shell, /href=\{`\/projects\/\$\{project\.id\}`\}/)
+  assert.doesNotMatch(shell, /DropdownMenuLabel>Active project/)
+  assert.doesNotMatch(pricing, /Most popular/)
+  assert.match(pricing, />Recommended</)
+})
+
+test("business-eval PDF paths bind the artifact to its current branding entitlement", () => {
+  const standard = createReportPdfStoragePath("agency-1", "report-1", 2)
+  const whiteLabel = createReportPdfStoragePath("agency-1", "report-1", 2, "white_label")
+
+  assert.equal(standard, "agency-1/reports/report-1/snapshot-2.pdf")
+  assert.equal(whiteLabel, "agency-1/reports/report-1/snapshot-2-white-label.pdf")
+  assert.equal(isExpectedReportPdfStoragePath(standard, "agency-1", "report-1", 2, "maintain_flow"), true)
+  assert.equal(isExpectedReportPdfStoragePath(standard, "agency-1", "report-1", 2, "white_label"), false)
+  assert.equal(isExpectedReportPdfStoragePath(whiteLabel, "agency-1", "report-1", 2, "white_label"), true)
+  assert.equal(isExpectedReportPdfStoragePath(whiteLabel, "agency-1", "report-1", 2, "maintain_flow"), false)
+  assert.match(reportStorage, /PDF_BRANDING_CHANGED/)
+  assert.match(reportStorage, /entitlement\.features\.whiteLabel \? "white_label" : "maintain_flow"/)
 })

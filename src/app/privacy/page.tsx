@@ -1,5 +1,7 @@
 import type { Metadata } from "next"
 
+import { MAINTAINFLOW_PRIVACY_LAST_UPDATED } from "@/lib/legal/acceptance"
+
 export const metadata: Metadata = {
   title: "Privacy Policy | Maintain Flow",
   description: "How Maintain Flow handles account, Business Evals journey, evidence, product-usage, and subscription data.",
@@ -16,12 +18,15 @@ const sections = [
     title: "Information we collect",
     body: [
       "Account information such as name, email address, authentication provider, email-confirmation state, and workspace membership.",
+      "Legal-acceptance evidence such as the exact Terms and Privacy Policy versions, acceptance source, authoritative server timestamp, and a hashed idempotency key. The raw browser idempotency key is not retained, and existing users are not silently backfilled as accepted.",
       "Workspace records such as users, memberships, projects, approved domains, authorization attestations, journeys, journey versions, steps, assertions, schedules, run attempts, verdicts, delivery settings, and legacy endpoint-assurance records.",
-      "Run evidence such as timestamps, safe URLs and origins, step and assertion results, redacted screenshots, runner/evaluator versions, error categories, and immutable delivery snapshots. We aim to collect the minimum evidence needed and do not store reusable browser profiles or unrestricted network archives by default.",
+      "Run evidence such as timestamps, safe URLs and origins, step and assertion results, redacted screenshots, runner/evaluator versions, error categories, and immutable delivery snapshots. We aim to collect the minimum evidence needed and do not store unrestricted network archives or reuse browser profiles across runs.",
+      "For a multi-phase Trial signup run, the configured browser provider may temporarily retain one isolated, provider-encrypted browser context containing the synthetic run's cookies, local storage, IndexedDB, session storage, service workers, caches, and browser preferences. It is used only to continue that same run across short-lived browser sessions, is never shared between runs or customers, and is queued for deletion on every terminal path.",
       "For an email-verification step, minimum run-correlated metadata such as the run-specific alias, sender, recipient, subject, timestamps, safe link properties, and a marker or digest. Maintain Flow does not connect to a customer's general mailbox for the initial Business Evals product.",
       "Legacy endpoint-journey data such as credential-free public HTTPS URLs, schedules, expected status and latency, structural assertions, status codes, and safe summaries. Legacy monitors do not store URL queries, custom headers, request bodies, or raw responses.",
       "Billing metadata from Stripe and Maintain Flow such as customer and subscription references, stored plan ID, public plan, billing interval, subscription status, workspace-trial end, contract version, migration state, payment-failure state, and signed-webhook event IDs and payload fingerprints used for idempotency. Raw Stripe webhook bodies are not retained. Maintain Flow does not store full card or bank-account numbers.",
       "Authenticated product events used to understand signup and activation, such as workspace, project, journey, first terminal run, trial, delivery, and paid-conversion milestones.",
+      "Operational error diagnostics such as a fixed error summary, minimal stack function and line metadata, release identifier, request method, and bounded payload-free breadcrumbs. Maintain Flow removes user identity, request payloads and URLs, contexts, extra data, breadcrumb payloads, email addresses, common credentials, and URL queries before configured error-monitoring delivery. Session Replay and default PII collection are disabled.",
       "On public pages, first-party acquisition events contain only an allowlisted page path, event type, fixed signup-CTA placement where relevant, and server timestamp. These records exclude query strings, referrers, cookies, visitor or session identifiers, IP addresses, user agents, form contents, and free-text metadata.",
       "Information you voluntarily send in an asynchronous support, billing, privacy, or security request.",
     ],
@@ -33,6 +38,7 @@ const sections = [
       "To authenticate users, confirm signup, protect tenant boundaries, enforce plan limits and evidence retention, and authorize private evidence, live-link, and PDF access.",
       "To open Stripe-hosted checkout and Customer Portal, distinguish the one card-free workspace trial from paid billing, reconcile subscription and contract-version state, preserve grandfathered subscriptions, and provide billing support.",
       "To deliver service and security messages, answer support requests asynchronously, investigate abuse, and operate product reliability.",
+      "To detect, diagnose, and resolve application errors against the exact software release without collecting the customer payload or evidence that caused the error.",
       "To understand aggregate acquisition and product activation without requiring applications, qualification calls, or cross-visit public tracking.",
       "To improve the product using aggregated operational patterns. We do not sell customer workspace data or use it for unrelated advertising.",
     ],
@@ -43,9 +49,10 @@ const sections = [
       "Supabase provides authentication, database, storage, and scheduled job infrastructure.",
       "Stripe provides hosted checkout, subscription billing, invoices, tax and payment processing, Customer Portal, and signed billing events.",
       "Vercel hosts the application and server-side API routes.",
-      "Configured browser-worker, queue, storage, and email-verification providers may process approved target content and redacted run evidence only where those Business Evals capabilities are enabled.",
-      "Our configured outbound email provider may process account confirmation, password recovery, security, evidence-delivery, or service emails. Recipient addresses are used only for the requested operational message.",
-      "Where optional AI assistance is enabled, a configured AI provider may receive the minimum redacted context needed to suggest supported steps or draft an explanation. AI does not determine verdicts, and customer workspace data is not authorized for unrelated advertising or shared-model training.",
+      "Browserbase provides the managed browser sessions used for enabled browser journeys. It may process approved public target content and the isolated temporary run context described above; provider recording and provider logging are disabled for these sessions.",
+      "Resend may process run-specific inbound email proof and outbound account, recovery, security, evidence-delivery, or service emails. Recipient addresses are used only for the requested operational message, and Maintain Flow does not connect Resend to a customer's general mailbox for the initial product.",
+      "Sentry may process the redacted operational error diagnostics described above for client, server, and edge error monitoring and source-mapped diagnosis. Maintain Flow does not enable Session Replay or default PII collection.",
+      "Where optional AI assistance is enabled, OpenAI may receive the minimum redacted context needed to suggest supported steps or draft an explanation. AI does not determine verdicts, and customer workspace data is not authorized for unrelated advertising or shared-model training.",
       "We may share information when required to comply with law, protect users or third parties, investigate abuse, or enforce service terms.",
     ],
   },
@@ -54,6 +61,7 @@ const sections = [
     body: [
       "Account, authorization, billing, and workspace records are retained while the account or workspace is active and as needed for security, disputes, tax, and audit obligations.",
       "Run evidence follows the effective plan: 7 days on Free, 30 days on Solo, 90 days on Team, and 365 days on Agency. Grandfathered subscriptions retain their existing contract until explicit migration. Evidence already subject to a legal or security hold may follow a separate documented period.",
+      "A temporary Browserbase run context is deleted when the run reaches a terminal path. Maintain Flow records a private deletion lease and retries abandoned or failed deletions; it is not retained as reusable customer evidence.",
       "Canceling a subscription does not automatically delete the account or workspace; the workspace returns to the applicable Free entitlement when paid access ends.",
       "Authorized workspace owners can request deletion of account, workspace, project, journey, run evidence, legacy endpoint record, live link, or stored PDF data by contacting sales@maintainflow.io. We verify control before deleting workspace-level records.",
       "Backups, provider logs, subscription and invoice records, fraud-prevention records, and security logs may persist for a limited period after deletion where required for infrastructure, tax, accounting, dispute, or legal obligations.",
@@ -63,7 +71,7 @@ const sections = [
   {
     title: "Security and access",
     body: [
-      "Maintain Flow uses tenant-scoped database policies, server-side workspace checks, and isolated per-run browser contexts to separate customer records and execution state.",
+      "Maintain Flow uses tenant-scoped database policies, server-side workspace checks, one isolated browser context per run, and separate short-lived browser sessions for each execution phase to separate customer records and execution state.",
       "Private evidence and PDFs are stored outside public buckets and retrieved through authorized application routes or short-lived scoped links.",
       "Billing-entitlement fields are server-controlled, and database limits apply even when requests do not originate from the normal product interface.",
       "Browser and endpoint journeys require target authorization and URL/network safety controls intended to reduce SSRF, cross-domain escape, and abuse risk before requests run.",
@@ -94,7 +102,7 @@ export default function PrivacyPage() {
         <p className="text-sm font-medium text-primary">Maintain Flow Privacy Policy</p>
         <h1 className="text-4xl font-medium tracking-tight md:text-5xl">Privacy Policy</h1>
         <p className="max-w-2xl text-base leading-7 text-muted-foreground">
-          Last updated: July 18, 2026. This policy explains how Maintain Flow handles data for self-serve accounts,
+          Last updated: {MAINTAINFLOW_PRIVACY_LAST_UPDATED}. This policy explains how Maintain Flow handles data for self-serve accounts,
           Business Evals workspaces, journey runs, evidence, product usage, legacy endpoint journeys, and subscriptions.
         </p>
       </header>

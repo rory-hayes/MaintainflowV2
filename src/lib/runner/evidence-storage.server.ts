@@ -3,6 +3,7 @@ import "server-only"
 import { createHash } from "node:crypto"
 
 import { getSupabaseServerConfig } from "@/lib/supabase/server"
+import { supabaseServiceAuthHeaders } from "@/lib/supabase/api-key-roles"
 import type { RunnerArtifact } from "@/lib/runner/types"
 
 export const EVAL_EVIDENCE_BUCKET = "maintainflow-eval-evidence"
@@ -51,8 +52,7 @@ export async function storePrivateEvalArtifact(input: {
     {
       method: "POST",
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
         "Content-Type": input.artifact.contentType,
         "Cache-Control": "private, max-age=0, must-revalidate",
         "x-upsert": "false",
@@ -84,8 +84,7 @@ export async function createEvalEvidenceSignedUrl(storagePath: string, expiresIn
     {
       method: "POST",
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ expiresIn: boundedExpiry }),
@@ -106,8 +105,7 @@ export async function deletePrivateEvalArtifact(storagePath: string) {
   const response = await fetch(`${config.supabaseUrl}/storage/v1/object/${EVAL_EVIDENCE_BUCKET}`, {
     method: "DELETE",
     headers: {
-      apikey: config.serviceRoleKey,
-      Authorization: `Bearer ${config.serviceRoleKey}`,
+      ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ prefixes: [storagePath] }),
@@ -127,8 +125,7 @@ export async function loadPrivateEvalArtifact(storagePath: string) {
     `${config.supabaseUrl}/storage/v1/object/${EVAL_EVIDENCE_BUCKET}/${encodeStoragePath(storagePath)}`,
     {
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       },
       cache: "no-store",
     }

@@ -11,6 +11,10 @@ import {
 } from "@/lib/auth-storage"
 import { trackProductEvent } from "@/lib/analytics/product-events"
 import {
+  requireCurrentLegalAcceptance,
+  type CurrentLegalAcceptance,
+} from "@/lib/legal/acceptance"
+import {
   clearSupabaseSession,
   completeSupabaseOAuthFromLocation,
   signInWithSupabase,
@@ -30,16 +34,19 @@ import {
   useState,
 } from "react"
 
-type SignUpInput = Parameters<typeof signUpWithLocalUser>[0] & { nextPath?: string }
+type SignUpInput = Parameters<typeof signUpWithLocalUser>[0] & {
+  nextPath?: string
+  legalAcceptance: CurrentLegalAcceptance
+}
 type SignInInput = Parameters<typeof signInWithLocalUser>[0]
 
 type AuthContextValue = {
   ready: boolean
   user: AuthUser | null
-  authMode: "supabase" | "local"
+  authMode: "supabase" | "local" | "unavailable"
   signUp: (input: SignUpInput) => Promise<AuthUser>
   signIn: (input: SignInInput) => Promise<AuthUser>
-  signInWithGoogle: (input?: { nextPath?: string }) => Promise<void>
+  signInWithGoogle: (input: { nextPath?: string; legalAcceptance: CurrentLegalAcceptance }) => Promise<void>
   completeOAuthSignIn: (location: Location) => Promise<AuthUser>
   signOut: () => Promise<void>
   updateProfile: (input: Partial<Pick<AuthUser, "name" | "company" | "role">>) => AuthUser | null
@@ -50,23 +57,33 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [user, setUser] = useState<AuthUser | null>(null)
-  const authMode: AuthContextValue["authMode"] = getSupabaseConfig().enabled ? "supabase" : "local"
+  const authConfig = getSupabaseConfig()
+  const authMode: AuthContextValue["authMode"] = authConfig.enabled
+    ? "supabase"
+    : authConfig.localEnabled
+      ? "local"
+      : "unavailable"
 
   useEffect(() => {
     let cancelled = false
 
     async function loadSession() {
-      if (getSupabaseConfig().enabled) {
+      const config = getSupabaseConfig()
+      if (config.enabled) {
         const nextUser = await verifySupabaseSession()
         if (!cancelled) {
           setUser(nextUser)
         }
-      } else {
+      } else if (config.localEnabled) {
         ensureDemoUser()
         clearSupabaseSession()
         if (!cancelled) {
           setUser(getCurrentUser())
         }
+      } else {
+        clearSupabaseSession()
+        signOutLocalUser()
+        if (!cancelled) setUser(null)
       }
 
       if (!cancelled) {
@@ -82,7 +99,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signUp = useCallback(async (input: SignUpInput) => {
-    const nextUser = getSupabaseConfig().enabled ? await signUpWithSupabase(input) : signUpWithLocalUser(input)
+    const config = getSupabaseConfig()
+    requireCurrentLegalAcceptance(input.legalAcceptance, "email_signup")
+    const nextUser = config.enabled
+      ? await signUpWithSupabase(input)
+      : config.localEnabled
+        ? signUpWithLocalUser(input)
+        : unavailableAuth()
     setUser(nextUser)
     trackProductEvent({ eventName: "signup_completed", metadata: { authMode } })
     trackProductEvent({ eventName: "sign_up_completed", metadata: { authMode } })
@@ -90,18 +113,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [authMode])
 
   const signIn = useCallback(async (input: SignInInput) => {
-    const nextUser = getSupabaseConfig().enabled ? await signInWithSupabase(input) : signInWithLocalUser(input)
+    const config = getSupabaseConfig()
+    const nextUser = config.enabled
+      ? await signInWithSupabase(input)
+      : config.localEnabled
+        ? signInWithLocalUser(input)
+        : unavailableAuth()
     setUser(nextUser)
     trackProductEvent({ eventName: "sign_in_completed", metadata: { authMode } })
     return nextUser
   }, [authMode])
 
-  const signInWithGoogle = useCallback(async (input?: { nextPath?: string }) => {
+  const signInWithGoogle = useCallback(async (input: { nextPath?: string; legalAcceptance: CurrentLegalAcceptance }) => {
     if (!getSupabaseConfig().enabled) {
       throw new Error("Google sign-in is not configured for Maintain Flow.")
     }
 
-    trackProductEvent({ eventName: "google_oauth_started", metadata: { nextPath: input?.nextPath ?? "" } })
+    requireCurrentLegalAcceptance(input.legalAcceptance, "oauth_callback")
+    trackProductEvent({ eventName: "google_oauth_started", metadata: { nextPath: input.nextPath ?? "" } })
     await startSupabaseGoogleOAuth(input)
   }, [])
 
@@ -127,11 +156,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const updateProfile = useCallback(
     (input: Partial<Pick<AuthUser, "name" | "company" | "role">>) => {
+      if (authMode === "unavailable") return null
       const nextUser = updateStoredUser(input)
       setUser(nextUser)
       return nextUser
     },
-    []
+    [authMode]
   )
 
   const value = useMemo(
@@ -140,6 +170,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+function unavailableAuth(): never {
+  throw new Error("Authentication is unavailable because the production Supabase configuration is incomplete.")
 }
 
 export function useAuth() {

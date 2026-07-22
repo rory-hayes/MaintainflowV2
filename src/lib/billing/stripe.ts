@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto"
+import { createHmac, timingSafeEqual } from "node:crypto"
 
 import {
   billingCheckoutUnitAmountCents,
@@ -9,14 +9,47 @@ import {
   getBillingInterval,
   isBillingPlanId,
   type BillingInterval,
+  type BillingContractVersion,
   type BillingPlanId,
 } from "./plans.ts"
 
 type StripeSessionResponse = {
+  id?: string
   url?: string
+  status?: string
+  payment_status?: string
+  expires_at?: number
+  customer?: string | { id?: string } | null
+  subscription?: string | { id?: string } | null
+  client_reference_id?: string | null
+  metadata?: Record<string, string>
   error?: {
     message?: string
   }
+}
+
+export const stripeApiVersion = "2026-02-25.clover"
+
+export type StripeCheckoutSessionSnapshot = {
+  id: string
+  url: string
+  status: "open" | "complete" | "expired"
+  paymentStatus: string
+  expiresAt: number
+  customerId: string
+  subscriptionId: string
+  clientReferenceId: string
+  metadata: Record<string, string>
+}
+
+export type StripeCheckoutReservationIdentity = {
+  id: string
+  agencyId: string
+  requestedByUserId: string
+  planId: string
+  interval: string
+  providerExpiresAt: string
+  stripeSessionId: string
 }
 
 export type StripeSubscriptionSnapshot = {
@@ -40,9 +73,11 @@ type CheckoutSessionInput = {
   origin: string
   agencyId: string
   userId: string
+  reservationId: string
   customerId?: string
   customerEmail?: string
-  idempotencyKey: string
+  providerIdempotencyKey: string
+  providerExpiresAt: string
 }
 
 type PortalSessionInput = {
@@ -50,6 +85,7 @@ type PortalSessionInput = {
   subscriptionId?: string
   origin: string
   flow?: BillingPortalFlow
+  billingContractVersion?: BillingContractVersion
 }
 
 export type BillingPortalFlow = "manage" | "subscription_update"
@@ -107,17 +143,30 @@ export function getStripeBillingStatus() {
   const annualPrices = Object.fromEntries(
     billingPlanIds.map((planId) => [planId, Boolean(getStripePriceId(planId, "annual"))])
   ) as Record<BillingPlanId, boolean>
-  const paidMonthlyPriceConfigured = (["starter", "growth", "scale"] as const).some((planId) => prices[planId])
+  const publicPriceIds = (["starter", "growth", "scale"] as const).flatMap((planId) => [
+    getStripePriceId(planId, "monthly"),
+    getStripePriceId(planId, "annual"),
+  ])
+  const publicPricesConfigured = publicPriceIds.every(Boolean)
+    && new Set(publicPriceIds).size === publicPriceIds.length
+  const webhookConfigured = Boolean(getStripeWebhookSecret())
+  const portalConfigured =
+    secretConfigured
+    && isStripeCustomerPortalEnabled()
+    && Boolean(getStripeCustomerPortalConfigurationId())
 
   return {
     secretConfigured,
+    webhookConfigured,
     prices,
     annualPrices,
-    checkoutConfigured: secretConfigured && paidMonthlyPriceConfigured,
-    portalConfigured:
-      secretConfigured &&
-      isStripeCustomerPortalEnabled() &&
-      Boolean(getStripeCustomerPortalConfigurationId()),
+    publicPricesConfigured,
+    checkoutConfigured:
+      secretConfigured
+      && webhookConfigured
+      && publicPricesConfigured
+      && portalConfigured,
+    portalConfigured,
     workspaceTrialDays: cardFreeWorkspaceTrialDays,
   }
 }
@@ -127,10 +176,23 @@ export function checkoutConfigReason(planId: string, interval: BillingInterval =
   if (planId === "free") return "The Free plan does not require Stripe checkout. Upgrade when you need more capacity."
   if (planId === "agency_plus") return "Agency+ is retained for existing workspaces and is not available to new self-serve customers."
   if (!getStripeSecretKey()) return "Stripe checkout needs STRIPE_SECRET_KEY before it can open."
+  if (!getStripeWebhookSecret()) {
+    return "Stripe checkout is disabled until signed billing webhooks are configured."
+  }
+  if (!isStripeCustomerPortalEnabled() || !getStripeCustomerPortalConfigurationId()) {
+    return "Stripe checkout is disabled until the Customer Portal is configured for subscription management."
+  }
   if (!getStripePriceId(planId, interval)) {
     return interval === "annual"
       ? "Annual billing is not available yet. Choose monthly billing."
       : `${billingPlans[planId].name} checkout is temporarily unavailable.`
+  }
+  const publicPriceIds = (["starter", "growth", "scale"] as const).flatMap((publicPlanId) => [
+    getStripePriceId(publicPlanId, "monthly"),
+    getStripePriceId(publicPlanId, "annual"),
+  ])
+  if (!publicPriceIds.every(Boolean) || new Set(publicPriceIds).size !== publicPriceIds.length) {
+    return "Stripe checkout is disabled until all six distinct monthly and annual plan prices are configured."
   }
   if (billingCheckoutUnitAmountCents(billingPlans[planId], interval) === null) {
     return "Stripe checkout needs a supported paid Maintain Flow plan before it can open."
@@ -141,7 +203,8 @@ export function checkoutConfigReason(planId: string, interval: BillingInterval =
 export function portalConfigReason(
   customerId?: string | null,
   flow: BillingPortalFlow = "manage",
-  subscriptionId?: string | null
+  subscriptionId?: string | null,
+  billingContractVersion?: BillingContractVersion | null
 ) {
   if (!getStripeSecretKey()) return "Stripe customer portal needs STRIPE_SECRET_KEY before it can open."
   if (!isStripeCustomerPortalEnabled()) return "Stripe Customer Portal is not enabled for this environment."
@@ -151,6 +214,9 @@ export function portalConfigReason(
   if (!customerId?.trim()) return "Stripe customer portal needs a synced Stripe customer for this workspace."
   if (flow === "subscription_update" && !subscriptionId?.trim()) {
     return "Stripe subscription updates need a synced subscription for this workspace."
+  }
+  if (flow === "subscription_update" && billingContractVersion !== businessEvalsBillingContractVersion) {
+    return "This grandfathered subscription keeps its existing price and capacity contract. Contact support before migrating it to a current plan."
   }
   return ""
 }
@@ -203,17 +269,27 @@ export async function createStripeCheckoutSession(input: CheckoutSessionInput) {
   const configReason = checkoutConfigReason(input.planId, interval)
   if (configReason || !secretKey || !priceId || checkoutAmount === null) throw new Error(configReason)
 
-  const successUrl = new URL("/settings", input.origin)
-  successUrl.searchParams.set("tab", "billing")
+  const successUrl = new URL("/settings/billing", input.origin)
   successUrl.searchParams.set("billing", "checkout-success")
-  const cancelUrl = new URL("/settings", input.origin)
-  cancelUrl.searchParams.set("tab", "billing")
+  successUrl.searchParams.set("session_id", "MF_CHECKOUT_SESSION_ID")
+  successUrl.searchParams.set("reservation_id", input.reservationId)
+  const cancelUrl = new URL("/settings/billing", input.origin)
   cancelUrl.searchParams.set("billing", "checkout-cancelled")
+  cancelUrl.searchParams.set("reservation_id", input.reservationId)
+  const providerExpiresAtMs = Date.parse(input.providerExpiresAt)
+  if (!Number.isFinite(providerExpiresAtMs)) {
+    throw new Error("Stripe checkout reservation expiry is invalid.")
+  }
+  if (!/^maintainflow-checkout-[a-f0-9]{64}$/.test(input.providerIdempotencyKey)) {
+    throw new Error("Stripe checkout reservation idempotency is invalid.")
+  }
+  const successUrlWithSession = successUrl.toString().replace("MF_CHECKOUT_SESSION_ID", "{CHECKOUT_SESSION_ID}")
 
   const body = new URLSearchParams({
     mode: "subscription",
-    success_url: successUrl.toString(),
+    success_url: successUrlWithSession,
     cancel_url: cancelUrl.toString(),
+    expires_at: String(Math.floor(providerExpiresAtMs / 1000)),
     "line_items[0][quantity]": "1",
     allow_promotion_codes: "true",
     client_reference_id: input.agencyId,
@@ -222,6 +298,7 @@ export async function createStripeCheckoutSession(input: CheckoutSessionInput) {
     "metadata[maintainflow_billing_contract]": businessEvalsBillingContractVersion,
     "metadata[maintainflow_agency_id]": input.agencyId,
     "metadata[maintainflow_user_id]": input.userId,
+    "metadata[maintainflow_checkout_reservation_id]": input.reservationId,
     "subscription_data[metadata][maintainflow_plan]": input.planId,
     "subscription_data[metadata][maintainflow_billing_interval]": interval,
     "subscription_data[metadata][maintainflow_billing_contract]": businessEvalsBillingContractVersion,
@@ -237,26 +314,38 @@ export async function createStripeCheckoutSession(input: CheckoutSessionInput) {
     body.set("customer_email", input.customerEmail.trim())
   }
 
-  const idempotencyKey = createHash("sha256")
-    .update(`${input.agencyId}:${input.planId}:${interval}:${input.idempotencyKey}`)
-    .digest("hex")
   const payload = await createStripeSession(
     "https://api.stripe.com/v1/checkout/sessions",
     body,
     secretKey,
-    `maintainflow-checkout-${idempotencyKey}`
+    input.providerIdempotencyKey
   )
-  const redirectUrl = payload.url
-
-  if (!isStripeHostedUrl(redirectUrl)) {
-    throw new Error("Stripe did not return a valid hosted checkout URL.")
-  }
-
-  return redirectUrl
+  return parseStripeCheckoutSession(payload, true)
 }
 
 export function getStripeWebhookSecret() {
   return process.env.STRIPE_WEBHOOK_SECRET?.trim() ?? ""
+}
+
+export function assertStripeCheckoutSessionMatchesReservation(
+  session: StripeCheckoutSessionSnapshot,
+  reservation: StripeCheckoutReservationIdentity
+) {
+  const expectedProviderExpiry = Math.floor(Date.parse(reservation.providerExpiresAt) / 1000)
+  if (
+    session.id !== reservation.stripeSessionId
+    || session.clientReferenceId !== reservation.agencyId
+    || session.metadata.maintainflow_agency_id !== reservation.agencyId
+    || session.metadata.maintainflow_checkout_reservation_id !== reservation.id
+    || session.metadata.maintainflow_plan !== reservation.planId
+    || session.metadata.maintainflow_billing_interval !== reservation.interval
+    || session.metadata.maintainflow_billing_contract !== businessEvalsBillingContractVersion
+    || session.metadata.maintainflow_user_id !== reservation.requestedByUserId
+    || !Number.isFinite(expectedProviderExpiry)
+    || Math.abs(session.expiresAt - expectedProviderExpiry) > 5
+  ) {
+    throw new Error("Stripe Checkout Session does not match the durable workspace reservation.")
+  }
 }
 
 export function verifyStripeWebhookSignature({
@@ -316,12 +405,16 @@ export async function createStripeCustomerPortalSession(input: PortalSessionInpu
   const secretKey = getStripeSecretKey()
   const configurationId = getStripeCustomerPortalConfigurationId()
   const flow = input.flow ?? "manage"
-  const configReason = portalConfigReason(input.customerId, flow, input.subscriptionId)
+  const configReason = portalConfigReason(
+    input.customerId,
+    flow,
+    input.subscriptionId,
+    input.billingContractVersion
+  )
 
   if (configReason || !secretKey || !configurationId) throw new Error(configReason)
 
-  const returnUrl = new URL("/settings", input.origin)
-  returnUrl.searchParams.set("tab", "billing")
+  const returnUrl = new URL("/settings/billing", input.origin)
   returnUrl.searchParams.set("billing", "portal-return")
 
   const body = new URLSearchParams({
@@ -359,7 +452,7 @@ export async function retrieveStripeSubscription(subscriptionId: string): Promis
   }
 
   const response = await fetch(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId.trim())}`, {
-    headers: { Authorization: `Bearer ${secretKey}` },
+    headers: stripeAuthorizationHeaders(secretKey),
     signal: AbortSignal.timeout(5_000),
   })
   const payload = (await response.json().catch(() => ({}))) as StripeSubscriptionSnapshot & StripeSessionResponse
@@ -371,11 +464,51 @@ export async function retrieveStripeSubscription(subscriptionId: string): Promis
   return payload
 }
 
+export async function retrieveStripeCheckoutSession(sessionId: string): Promise<StripeCheckoutSessionSnapshot> {
+  const secretKey = getStripeSecretKey()
+  if (!secretKey || !sessionId.trim()) {
+    throw new Error("Stripe checkout reconciliation is not configured.")
+  }
+  const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId.trim())}`, {
+    headers: stripeAuthorizationHeaders(secretKey),
+    signal: AbortSignal.timeout(5_000),
+  })
+  const payload = (await response.json().catch(() => ({}))) as StripeSessionResponse
+  if (!response.ok) {
+    throw new Error(payload.error?.message || "Stripe could not reconcile the Checkout Session.")
+  }
+  return parseStripeCheckoutSession(payload, false)
+}
+
+export async function expireStripeCheckoutSession(sessionId: string): Promise<StripeCheckoutSessionSnapshot> {
+  const secretKey = getStripeSecretKey()
+  if (!secretKey || !sessionId.trim()) {
+    throw new Error("Stripe checkout expiry is not configured.")
+  }
+  const response = await fetch(
+    `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId.trim())}/expire`,
+    {
+      method: "POST",
+      headers: {
+        ...stripeAuthorizationHeaders(secretKey),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      signal: AbortSignal.timeout(5_000),
+    }
+  )
+  const payload = (await response.json().catch(() => ({}))) as StripeSessionResponse
+  if (!response.ok) {
+    throw new Error(payload.error?.message || "Stripe could not expire the previous Checkout Session.")
+  }
+  return parseStripeCheckoutSession(payload, false)
+}
+
 async function createStripeSession(endpoint: string, body: URLSearchParams, secretKey: string, idempotencyKey?: string) {
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secretKey}`,
+      "Stripe-Version": stripeApiVersion,
       "Content-Type": "application/x-www-form-urlencoded",
       ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
     },
@@ -388,4 +521,42 @@ async function createStripeSession(endpoint: string, body: URLSearchParams, secr
   }
 
   return payload
+}
+
+function stripeAuthorizationHeaders(secretKey: string) {
+  return {
+    Authorization: `Bearer ${secretKey}`,
+    "Stripe-Version": stripeApiVersion,
+  }
+}
+
+function parseStripeCheckoutSession(payload: StripeSessionResponse, requireHostedUrl: boolean): StripeCheckoutSessionSnapshot {
+  const id = payload.id?.trim() ?? ""
+  const redirectUrl = payload.url?.trim() ?? ""
+  const status = payload.status
+  if (
+    !id
+    || (requireHostedUrl ? !isStripeHostedUrl(redirectUrl) : Boolean(redirectUrl) && !isStripeHostedUrl(redirectUrl))
+    || (status !== "open" && status !== "complete" && status !== "expired")
+  ) {
+    throw new Error("Stripe did not return a valid hosted Checkout Session.")
+  }
+  if (typeof payload.expires_at !== "number" || !Number.isFinite(payload.expires_at)) {
+    throw new Error("Stripe did not return a valid Checkout Session expiry.")
+  }
+  return {
+    id,
+    url: redirectUrl,
+    status,
+    paymentStatus: payload.payment_status?.trim() ?? "",
+    expiresAt: payload.expires_at,
+    customerId: stripeExpandableId(payload.customer),
+    subscriptionId: stripeExpandableId(payload.subscription),
+    clientReferenceId: payload.client_reference_id?.trim() ?? "",
+    metadata: payload.metadata ?? {},
+  }
+}
+
+function stripeExpandableId(value: string | { id?: string } | null | undefined) {
+  return typeof value === "string" ? value : value?.id?.trim() ?? ""
 }

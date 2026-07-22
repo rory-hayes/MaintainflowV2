@@ -1,9 +1,11 @@
 import "server-only"
 
+import { BusinessEvalsRequestJsonError } from "@/lib/api/business-evals-contracts"
 import { bearerToken } from "@/lib/supabase/report-download.server"
 import { supabaseServiceJson } from "@/lib/supabase/server"
 import { getSupabaseUserAuthConfig, verifySupabaseAccessToken } from "@/lib/supabase/user-auth"
 import { isBusinessEvalsWorkspaceEnabled } from "@/lib/features/business-evals"
+import { safeServerLog } from "@/lib/observability/safe-server-log"
 
 export type WorkspaceRole = "owner" | "admin" | "member"
 
@@ -95,6 +97,9 @@ export async function requireBusinessEvalsAuth(
 }
 
 export function businessEvalsErrorResponse(error: unknown) {
+  if (error instanceof BusinessEvalsRequestJsonError) {
+    return Response.json({ ok: false, error: { code: error.code, message: error.message } }, { status: error.status })
+  }
   if (error instanceof BusinessEvalsApiError) {
     return Response.json({ ok: false, error: { code: error.code, message: error.message } }, { status: error.status })
   }
@@ -106,7 +111,7 @@ export function businessEvalsErrorResponse(error: unknown) {
     )
   }
 
-  console.error("[business-evals-api]", error)
+  safeServerLog("error", "business-evals-api-failure", { reference: crypto.randomUUID() })
   return Response.json(
     { ok: false, error: { code: "INTERNAL_ERROR", message: "The request could not be completed." } },
     { status: 500 }

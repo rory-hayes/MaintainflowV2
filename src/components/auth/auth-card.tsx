@@ -4,6 +4,7 @@ import { BrandMark } from "@/components/brand/brand-mark"
 import { authLightThemeStyle } from "@/components/auth/auth-light-theme"
 import { Button } from "@/components/ui/button"
 import { ButtonLink } from "@/components/ui/button-link"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Card,
   CardContent,
@@ -17,6 +18,11 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { isSignupConfirmationRequired, toActionableAuthError } from "@/lib/auth/errors"
 import { safeAuthNextPath } from "@/lib/auth/next-path"
 import { onboardingPathForIntent, readPublicSignupIntent, type PublicSignupIntent } from "@/lib/auth/signup-intent"
+import {
+  currentLegalAcceptance,
+  MAINTAINFLOW_PRIVACY_LAST_UPDATED,
+  MAINTAINFLOW_TERMS_LAST_UPDATED,
+} from "@/lib/legal/acceptance"
 import {
   AUTH_PASSWORD_MIN_LENGTH,
   firstInvalidSignupField,
@@ -64,6 +70,8 @@ export function AuthCard({ mode }: AuthCardProps) {
   const [password, setPassword] = useState("")
   const [fieldErrors, setFieldErrors] = useState<SignupFieldErrors>({})
   const [formError, setFormError] = useState("")
+  const [legalAccepted, setLegalAccepted] = useState(false)
+  const [legalError, setLegalError] = useState("")
   const [notice, setNotice] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [nextPath, setNextPath] = useState(mode === "signup" ? "/onboarding" : "/projects")
@@ -102,6 +110,7 @@ export function AuthCard({ mode }: AuthCardProps) {
     event.preventDefault()
     setFieldErrors({})
     setFormError("")
+    setLegalError("")
     setNotice("")
 
     let signupInput = { name, email, password, company, role }
@@ -113,13 +122,22 @@ export function AuthCard({ mode }: AuthCardProps) {
         return
       }
       signupInput = validation.value
+      if (!legalAccepted) {
+        setLegalError("You must explicitly accept the current Terms and acknowledge the Privacy Policy to create an account.")
+        document.getElementById("legal-consent")?.focus()
+        return
+      }
     }
 
     setIsSubmitting(true)
 
     try {
       if (isSignup) {
-        await signUp({ ...signupInput, nextPath })
+        await signUp({
+          ...signupInput,
+          nextPath,
+          legalAcceptance: currentLegalAcceptance("email_signup"),
+        })
       } else {
         await signIn({ email, password })
       }
@@ -141,9 +159,18 @@ export function AuthCard({ mode }: AuthCardProps) {
   async function handleGoogleSignIn() {
     setFieldErrors({})
     setFormError("")
+    setLegalError("")
     setNotice("")
+    if (!legalAccepted) {
+      setLegalError("You must explicitly accept the current Terms and acknowledge the Privacy Policy before continuing with Google.")
+      document.getElementById("legal-consent")?.focus()
+      return
+    }
     try {
-      await signInWithGoogle({ nextPath })
+      await signInWithGoogle({
+        nextPath,
+        legalAcceptance: currentLegalAcceptance("oauth_callback"),
+      })
     } catch (googleError) {
       const message = googleError instanceof Error ? googleError.message : ""
       setFormError(toActionableAuthError(message, "Google sign-in is not configured."))
@@ -228,9 +255,11 @@ export function AuthCard({ mode }: AuthCardProps) {
                     {isSignup ? "Create your Maintain Flow account" : "Log in to Maintain Flow"}
                   </CardTitle>
                   <CardDescription className="mt-3 text-base leading-7">
-                    {isSignup
+                    {authMode === "unavailable"
+                      ? "Authentication is unavailable until the production Supabase connection is restored."
+                      : isSignup
                       ? authMode === "supabase"
-                        ? "Use an inbox you can access for Maintain Flow confirmation and recovery emails."
+                        ? "Use an inbox you can access for Maintain Flow confirmation and recovery emails. The links work in any current browser or device."
                         : "Use an inbox you can access. Test/example domains are rejected so confirmation and recovery stay reliable."
                       : authMode === "supabase"
                         ? "Log in with your Maintain Flow email and password."
@@ -238,7 +267,7 @@ export function AuthCard({ mode }: AuthCardProps) {
                   </CardDescription>
                 </div>
                 <span className="hidden shrink-0 rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-medium text-primary sm:inline-flex">
-                  {authMode === "supabase" ? "Email + SSO" : "Email login"}
+                  {authMode === "supabase" ? "Email + SSO" : authMode === "local" ? "Email login" : "Unavailable"}
                 </span>
               </div>
             </CardHeader>
@@ -254,6 +283,11 @@ export function AuthCard({ mode }: AuthCardProps) {
                   className="mb-5 rounded-lg border border-primary/20 bg-primary/10 p-4 text-sm leading-6 text-foreground"
                 >
                   {notice}
+                </div>
+              ) : null}
+              {authMode === "unavailable" ? (
+                <div role="alert" className="mb-5 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm leading-6 text-foreground">
+                  Sign-in is fail-closed because the production authentication provider is not configured. No demo or browser-local account has been created.
                 </div>
               ) : null}
               <form className="flex flex-col gap-6" onSubmit={handleSubmit} noValidate>
@@ -353,7 +387,7 @@ export function AuthCard({ mode }: AuthCardProps) {
                     />
                     {isSignup && (
                       <FieldDescription id="signup-email-description">
-                        Use an inbox you can access for confirmation and password recovery. Test, example, and localhost domains are rejected.
+                        Use an inbox you can access for confirmation and password recovery; the links work in any current browser or device. Test, example, and localhost domains are rejected.
                       </FieldDescription>
                     )}
                     <FieldError id="signup-email-error">{fieldErrors.email}</FieldError>
@@ -390,6 +424,41 @@ export function AuthCard({ mode }: AuthCardProps) {
                 </FieldGroup>
 
                 <div className="flex flex-col gap-3">
+                  {isSignup || authMode === "supabase" ? (
+                    <div
+                      className={`rounded-lg border p-4 ${legalError ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/30"}`}
+                      data-invalid={Boolean(legalError)}
+                    >
+                      <div className="flex items-start gap-3">
+                        <Checkbox
+                          id="legal-consent"
+                          checked={legalAccepted}
+                          aria-invalid={Boolean(legalError)}
+                          aria-describedby={`legal-consent-description${legalError ? " legal-consent-error" : ""}`}
+                          onCheckedChange={(value) => {
+                            setLegalAccepted(value === true)
+                            setLegalError("")
+                          }}
+                          className="mt-0.5"
+                        />
+                        <div className="min-w-0">
+                          <label className="cursor-pointer text-sm font-medium leading-6 text-foreground" htmlFor="legal-consent">
+                            I agree to the current Terms and acknowledge the Privacy Policy.
+                          </label>
+                          <p id="legal-consent-description" className="mt-1 text-xs leading-5 text-muted-foreground">
+                            Required {isSignup ? `to create an account${authMode === "supabase" ? " or continue with Google" : ""}` : "only when continuing with Google"}. Read the{" "}
+                            <Link className="font-medium text-primary hover:underline" href="/terms">Terms</Link> and{" "}
+                            <Link className="font-medium text-primary hover:underline" href="/privacy">Privacy Policy</Link>. Current versions: Terms {MAINTAINFLOW_TERMS_LAST_UPDATED}; Privacy {MAINTAINFLOW_PRIVACY_LAST_UPDATED}. This box is never selected for you.
+                          </p>
+                        </div>
+                      </div>
+                      {legalError ? (
+                        <p id="legal-consent-error" role="alert" className="mt-3 text-xs font-medium leading-5 text-destructive">
+                          {legalError}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {authMode === "supabase" ? (
                     <>
                       <Button
@@ -407,16 +476,11 @@ export function AuthCard({ mode }: AuthCardProps) {
                       </p>
                     </>
                   ) : null}
-                  <Button type="submit" className="h-11 w-full" disabled={!ready || isSubmitting}>
+                  <Button type="submit" className="h-11 w-full" disabled={!ready || isSubmitting || authMode === "unavailable"}>
                     {isSignup ? <IconUserPlus data-icon="inline-start" /> : <IconKey data-icon="inline-start" />}
                     {isSubmitting ? "Working..." : isSignup ? "Create account" : "Log in"}
                     <IconArrowRight data-icon="inline-end" />
                   </Button>
-                  {isSignup ? (
-                    <p className="text-center text-xs leading-5 text-muted-foreground">
-                      By creating an account, you agree to the <Link className="font-medium text-primary hover:underline" href="/terms">Terms</Link> and acknowledge the <Link className="font-medium text-primary hover:underline" href="/privacy">Privacy Policy</Link>.
-                    </p>
-                  ) : null}
                 </div>
 
                 {!isSignup && (

@@ -7,6 +7,7 @@ import {
   addIssueNote,
   activationChecklist,
   archiveClientRecord,
+  clearCoreDatabase,
   createAgencyWorkspace,
   createClientRecord,
   createPendingWorkflow,
@@ -28,6 +29,7 @@ import {
   updateAgency,
   updateClientRecord,
   type WorkflowSetupInput,
+  type CoreDatabaseStorageScope,
   writeCoreDatabase,
 } from "@/lib/core/local-store"
 import type { CoreDatabase, EndpointTestInput, EndpointTestResult } from "@/lib/core/types"
@@ -41,9 +43,10 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 
 export function useCoreLoop(user: AuthUser | null) {
   const useSupabase = getSupabaseConfig().enabled
+  const databaseStorage: CoreDatabaseStorageScope = useSupabase ? "session" : "local"
   const userId = user?.id ?? null
   const [database, setDatabase] = useState<CoreDatabase>(() =>
-    typeof window === "undefined" || useSupabase ? emptyCoreDatabase() : readCoreDatabase()
+    typeof window === "undefined" || useSupabase ? emptyCoreDatabase() : readCoreDatabase(databaseStorage)
   )
   const [loading, setLoading] = useState(useSupabase)
   const [loadedUserId, setLoadedUserId] = useState<string | null>(null)
@@ -54,6 +57,7 @@ export function useCoreLoop(user: AuthUser | null) {
   const checklist = useMemo(() => (agency ? activationChecklist(database, agency.id) : null), [agency, database])
   const initialSupabaseLoadPending = useSupabase && !!user && loadedUserId !== user.id
   const workspaceLoading = loading || initialSupabaseLoadPending
+  const readActiveDatabase = useCallback(() => readCoreDatabase(databaseStorage), [databaseStorage])
   const trackCoreEvent = useCallback(
     (eventName: ProductEventName, metadata: ProductEventMetadata = {}, agencyId = agency?.id ?? null) => {
       trackProductEvent({ eventName, agencyId, metadata })
@@ -69,6 +73,7 @@ export function useCoreLoop(user: AuthUser | null) {
     }
 
     if (!user) {
+      clearCoreDatabase("session")
       setDatabase(emptyCoreDatabase())
       setLoading(false)
       setLoadedUserId(null)
@@ -81,7 +86,7 @@ export function useCoreLoop(user: AuthUser | null) {
       .then((nextDatabase) => {
         if (!cancelled) {
           setDatabase(nextDatabase)
-          writeCoreDatabase(nextDatabase)
+          writeCoreDatabase(nextDatabase, databaseStorage)
           setSyncError("")
           setLoadedUserId(user.id)
         }
@@ -101,13 +106,13 @@ export function useCoreLoop(user: AuthUser | null) {
     return () => {
       cancelled = true
     }
-  }, [useSupabase, user])
+  }, [databaseStorage, useSupabase, user])
 
   const applyDatabase = useCallback((nextDatabase: CoreDatabase) => {
     setDatabase(nextDatabase)
-    writeCoreDatabase(nextDatabase)
+    writeCoreDatabase(nextDatabase, databaseStorage)
     return nextDatabase
-  }, [])
+  }, [databaseStorage])
 
   const reloadWorkspace = useCallback(async () => {
     if (!userId) {
@@ -119,7 +124,7 @@ export function useCoreLoop(user: AuthUser | null) {
     }
 
     try {
-      const nextDatabase = useSupabase ? await loadCoreDatabaseFromSupabase(userId) : readCoreDatabase()
+      const nextDatabase = useSupabase ? await loadCoreDatabaseFromSupabase(userId) : readActiveDatabase()
       applyDatabase(nextDatabase)
       setLoadedUserId(userId)
       setSyncError("")
@@ -128,10 +133,10 @@ export function useCoreLoop(user: AuthUser | null) {
       setSyncError(error instanceof Error ? error.message : "Could not reload workspace data.")
       throw error
     }
-  }, [applyDatabase, useSupabase, userId])
+  }, [applyDatabase, readActiveDatabase, useSupabase, userId])
 
   const persistDatabase = useCallback(async (nextDatabase: CoreDatabase) => {
-    const previousDatabase = readCoreDatabase()
+    const previousDatabase = readActiveDatabase()
     applyDatabase(nextDatabase)
 
     if (!useSupabase || !user) {
@@ -157,7 +162,7 @@ export function useCoreLoop(user: AuthUser | null) {
       }
       throw error
     }
-  }, [applyDatabase, useSupabase, user])
+  }, [applyDatabase, readActiveDatabase, useSupabase, user])
 
   const createAgency = useCallback(
     async (input: { name: string; slug: string }) => {
@@ -173,7 +178,7 @@ export function useCoreLoop(user: AuthUser | null) {
           trackCoreEvent("workspace_created", { authMode: "supabase" }, nextAgencyId)
           return nextDatabase
         }
-        const nextDatabase = await persistDatabase(createAgencyWorkspace(readCoreDatabase(), user, input))
+        const nextDatabase = await persistDatabase(createAgencyWorkspace(readActiveDatabase(), user, input))
         const nextAgencyId = nextDatabase.memberships.find((membership) => membership.userId === user.id)?.agencyId ?? null
         trackCoreEvent("workspace_created", { authMode: "local" }, nextAgencyId)
         return nextDatabase
@@ -184,13 +189,13 @@ export function useCoreLoop(user: AuthUser | null) {
         setCreatingAgency(false)
       }
     },
-    [applyDatabase, persistDatabase, trackCoreEvent, useSupabase, user]
+    [applyDatabase, persistDatabase, readActiveDatabase, trackCoreEvent, useSupabase, user]
   )
 
   const saveAgency = useCallback(
     async (input: Parameters<typeof updateAgency>[2]) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const previousDatabase = readCoreDatabase()
+      const previousDatabase = readActiveDatabase()
       const previousAgency = previousDatabase.agencies.find((item) => item.id === agency.id)
       const nextDatabase = updateAgency(previousDatabase, agency.id, input, user.id)
       applyDatabase(nextDatabase)
@@ -221,13 +226,13 @@ export function useCoreLoop(user: AuthUser | null) {
         throw error
       }
     },
-    [agency, applyDatabase, trackCoreEvent, useSupabase, user]
+    [agency, applyDatabase, readActiveDatabase, trackCoreEvent, useSupabase, user]
   )
 
   const createClient = useCallback(
     async (input: Parameters<typeof createClientRecord>[3]) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const currentDatabase = readCoreDatabase()
+      const currentDatabase = readActiveDatabase()
       const hadClient = currentDatabase.clients.some((client) => client.agencyId === agency.id && !client.archivedAt)
       const nextDatabase = await persistDatabase(createClientRecord(currentDatabase, agency.id, user.id, input))
       trackCoreEvent("client_created", { reportCadence: input.reportCadence ?? "monthly" })
@@ -236,27 +241,27 @@ export function useCoreLoop(user: AuthUser | null) {
       }
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const updateClient = useCallback(
     async (clientId: string, input: Parameters<typeof updateClientRecord>[4]) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(updateClientRecord(readCoreDatabase(), agency.id, user.id, clientId, input))
+      const nextDatabase = await persistDatabase(updateClientRecord(readActiveDatabase(), agency.id, user.id, clientId, input))
       trackCoreEvent("client_updated")
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const archiveClient = useCallback(
     async (clientId: string) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(archiveClientRecord(readCoreDatabase(), agency.id, user.id, clientId))
+      const nextDatabase = await persistDatabase(archiveClientRecord(readActiveDatabase(), agency.id, user.id, clientId))
       trackCoreEvent("client_archived")
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const testEndpoint = useCallback(async (input: EndpointTestInput) => {
@@ -331,7 +336,7 @@ export function useCoreLoop(user: AuthUser | null) {
   const saveWorkflow = useCallback(
     async (input: WorkflowSetupInput, result: EndpointTestResult) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const currentDatabase = readCoreDatabase()
+      const currentDatabase = readActiveDatabase()
       const hadWorkflow = currentDatabase.workflows.some((workflow) => workflow.agencyId === agency.id && !workflow.archivedAt)
       const hadCheckRun = currentDatabase.checkRuns.some((run) => run.agencyId === agency.id)
       let recordedResult = result
@@ -380,13 +385,13 @@ export function useCoreLoop(user: AuthUser | null) {
       }
       return nextDatabase
     },
-    [agency, persistDatabase, reloadWorkspace, runPersistedCheck, trackCoreEvent, useSupabase, user]
+    [agency, persistDatabase, readActiveDatabase, reloadWorkspace, runPersistedCheck, trackCoreEvent, useSupabase, user]
   )
 
   const savePendingWorkflow = useCallback(
     async (input: WorkflowSetupInput & { pendingReason: string }) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(createPendingWorkflow(readCoreDatabase(), agency.id, user.id, input))
+      const nextDatabase = await persistDatabase(createPendingWorkflow(readActiveDatabase(), agency.id, user.id, input))
       trackCoreEvent("workflow_pending_created", {
         type: input.type,
         environment: input.environment,
@@ -395,13 +400,13 @@ export function useCoreLoop(user: AuthUser | null) {
       })
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const runCheck = useCallback(
     async (workflowId: string) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const currentDatabase = readCoreDatabase()
+      const currentDatabase = readActiveDatabase()
       const workflow = currentDatabase.workflows.find((item) => item.agencyId === agency.id && item.id === workflowId)
       if (!workflow) throw new Error("Workflow was not found.")
       const activeChecks = currentDatabase.checks.filter(
@@ -470,23 +475,23 @@ export function useCoreLoop(user: AuthUser | null) {
       }
       return persistedDatabase
     },
-    [agency, persistDatabase, reloadWorkspace, runPersistedCheck, testEndpoint, trackCoreEvent, useSupabase, user]
+    [agency, persistDatabase, readActiveDatabase, reloadWorkspace, runPersistedCheck, testEndpoint, trackCoreEvent, useSupabase, user]
   )
 
   const recordRepair = useCallback(
     async (issueId: string, resolutionNote: string) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(recordIssueRepair(readCoreDatabase(), agency.id, user.id, issueId, resolutionNote))
+      const nextDatabase = await persistDatabase(recordIssueRepair(readActiveDatabase(), agency.id, user.id, issueId, resolutionNote))
       trackCoreEvent("issue_repair_recorded")
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const runDueChecks = useCallback(async () => {
     if (!user || !agency) throw new Error("Create an agency first.")
     const startedAt = new Date().toISOString()
-    const currentDatabase = readCoreDatabase()
+    const currentDatabase = readActiveDatabase()
     const dueChecks = selectDueChecks(currentDatabase, agency.id, startedAt)
     const attempts = []
 
@@ -539,7 +544,7 @@ export function useCoreLoop(user: AuthUser | null) {
       }
     }
 
-    const nextDatabase = await persistDatabase(recordScheduledCheckJob(readCoreDatabase(), agency.id, user.id, {
+    const nextDatabase = await persistDatabase(recordScheduledCheckJob(readActiveDatabase(), agency.id, user.id, {
       startedAt,
       checksDue: dueChecks.length,
       attempts,
@@ -549,35 +554,35 @@ export function useCoreLoop(user: AuthUser | null) {
       attempts: attempts.length,
     })
     return nextDatabase
-  }, [agency, persistDatabase, reloadWorkspace, runPersistedCheck, testEndpoint, trackCoreEvent, useSupabase, user])
+  }, [agency, persistDatabase, readActiveDatabase, reloadWorkspace, runPersistedCheck, testEndpoint, trackCoreEvent, useSupabase, user])
 
   const updateIssue = useCallback(
     async (issueId: string, input: Parameters<typeof updateIssueRecord>[4]) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(updateIssueRecord(readCoreDatabase(), agency.id, user.id, issueId, input))
+      const nextDatabase = await persistDatabase(updateIssueRecord(readActiveDatabase(), agency.id, user.id, issueId, input))
       trackCoreEvent("issue_updated", {
         status: input.status ?? "",
         reportable: typeof input.reportable === "boolean" ? input.reportable : null,
       })
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const createIssueNote = useCallback(
     async (issueId: string, body: string, reportSafe: boolean) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(addIssueNote(readCoreDatabase(), agency.id, user.id, issueId, body, reportSafe))
+      const nextDatabase = await persistDatabase(addIssueNote(readActiveDatabase(), agency.id, user.id, issueId, body, reportSafe))
       trackCoreEvent("issue_note_created", { reportSafe })
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const generateReport = useCallback(
     async (input: { clientId: string; periodStart: string; periodEnd: string }) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const currentDatabase = readCoreDatabase()
+      const currentDatabase = readActiveDatabase()
       const hadReport = currentDatabase.reports.some((report) => report.agencyId === agency.id)
       const nextDatabase = await persistDatabase(generateReportRecord(currentDatabase, agency, user.id, input))
       trackCoreEvent("report_generated", {
@@ -592,7 +597,7 @@ export function useCoreLoop(user: AuthUser | null) {
       }
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const prepareReportDownload = useCallback(
@@ -600,7 +605,7 @@ export function useCoreLoop(user: AuthUser | null) {
       if (!user || !agency) throw new Error("Create an agency first.")
 
       if (!useSupabase) {
-        const preparedDatabase = createReportDownload(readCoreDatabase(), agency, user.id, reportId)
+        const preparedDatabase = createReportDownload(readActiveDatabase(), agency, user.id, reportId)
         const nextDatabase = await persistDatabase(preparedDatabase)
         trackCoreEvent("report_pdf_generated")
         return nextDatabase
@@ -623,27 +628,27 @@ export function useCoreLoop(user: AuthUser | null) {
         throw error
       }
     },
-    [agency, applyDatabase, persistDatabase, trackCoreEvent, useSupabase, user]
+    [agency, applyDatabase, persistDatabase, readActiveDatabase, trackCoreEvent, useSupabase, user]
   )
 
   const refreshReport = useCallback(
     async (reportId: string) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(refreshReportRecord(readCoreDatabase(), agency, user.id, reportId))
+      const nextDatabase = await persistDatabase(refreshReportRecord(readActiveDatabase(), agency, user.id, reportId))
       trackCoreEvent("report_generated", { action: "snapshot_refreshed" })
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   const saveReportNarrative = useCallback(
     async (reportId: string, narrative: string) => {
       if (!user || !agency) throw new Error("Create an agency first.")
-      const nextDatabase = await persistDatabase(updateReportNarrative(readCoreDatabase(), agency, user.id, reportId, narrative))
+      const nextDatabase = await persistDatabase(updateReportNarrative(readActiveDatabase(), agency, user.id, reportId, narrative))
       trackCoreEvent("report_narrative_updated", { length: narrative.length })
       return nextDatabase
     },
-    [agency, persistDatabase, trackCoreEvent, user]
+    [agency, persistDatabase, readActiveDatabase, trackCoreEvent, user]
   )
 
   return {

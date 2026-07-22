@@ -13,6 +13,7 @@ import {
   BillingWorkspaceRequiredError,
   loadBillingWorkspaceForToken,
 } from "@/lib/billing/workspace.server"
+import { BoundedJsonRequestError, readBoundedJson } from "@/lib/http/bounded-json.server"
 import { bearerToken } from "@/lib/supabase/report-download.server"
 
 export const runtime = "nodejs"
@@ -27,7 +28,10 @@ export async function POST(request: NextRequest) {
   try {
     const workspace = await loadBillingWorkspaceForToken(token, request.headers.get("x-maintainflow-workspace-id"))
     assertBillingAdmin(workspace)
-    const body = (await request.json().catch(() => ({}))) as { flow?: string }
+    const payload = await readBoundedJson(request, 2_048)
+    const body = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as { flow?: string }
+      : {}
     const flow = body.flow ?? "manage"
     if (!isBillingPortalFlow(flow)) {
       return NextResponse.json({ error: "Select a supported Stripe customer portal action." }, { status: 400 })
@@ -36,7 +40,8 @@ export async function POST(request: NextRequest) {
     const configReason = portalConfigReason(
       workspace.agency.stripeCustomerId,
       flow,
-      workspace.agency.stripeSubscriptionId
+      workspace.agency.stripeSubscriptionId,
+      workspace.agency.billingContractVersion
     )
     if (configReason) {
       return NextResponse.json({ error: configReason }, { status: 503 })
@@ -47,11 +52,14 @@ export async function POST(request: NextRequest) {
       subscriptionId: workspace.agency.stripeSubscriptionId,
       origin: getTrustedBillingOrigin(request.nextUrl.origin),
       flow,
+      billingContractVersion: workspace.agency.billingContractVersion,
     })
 
     return NextResponse.json({ url })
   } catch (error) {
-    const status = error instanceof BillingAuthenticationError
+    const status = error instanceof BoundedJsonRequestError
+      ? error.status
+      : error instanceof BillingAuthenticationError
       ? 401
       : error instanceof BillingAuthorizationError
         ? 403

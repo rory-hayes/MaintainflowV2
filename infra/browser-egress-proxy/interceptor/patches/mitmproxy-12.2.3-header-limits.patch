@@ -1,0 +1,328 @@
+diff --git a/mitmproxy/proxy/layers/http/_http1.py b/mitmproxy/proxy/layers/http/_http1.py
+index 78add85..c0644b8 100644
+--- a/mitmproxy/proxy/layers/http/_http1.py
++++ b/mitmproxy/proxy/layers/http/_http1.py
+@@ -37,6 +37,22 @@ from mitmproxy.utils import human
+ 
+ TBodyReader = Union[ChunkedReader, Http10Reader, ContentLengthReader]
+ 
++MAX_HTTP1_HEADER_BYTES = 64 * 1024
++
++
++class _Http1HeadersTooLarge(ValueError):
++    pass
++
++
++def _extract_header_lines(buf: ReceiveBuffer) -> list[bytearray] | None:
++    """Extract a complete HTTP/1 head, rejecting it before semantic parsing."""
++    buffered = len(buf)
++    lines = buf.maybe_extract_lines()
++    header_size = buffered if lines is None else buffered - len(buf)
++    if header_size > MAX_HTTP1_HEADER_BYTES:
++        raise _Http1HeadersTooLarge
++    return lines
++
+ 
+ class Http1Connection(HttpConnection, metaclass=abc.ABCMeta):
+     stream_id: StreamId | None = None
+@@ -282,7 +298,19 @@ class Http1Server(Http1Connection):
+         self, event: events.ConnectionEvent
+     ) -> layer.CommandGenerator[None]:
+         if isinstance(event, events.DataReceived):
+-            request_head = self.buf.maybe_extract_lines()
++            try:
++                request_head = _extract_header_lines(self.buf)
++            except _Http1HeadersTooLarge:
++                yield commands.SendData(
++                    self.conn,
++                    make_error_response(
++                        status_codes.REQUEST_HEADER_FIELDS_TOO_LARGE,
++                        f"HTTP/1 request headers exceeded {MAX_HTTP1_HEADER_BYTES} bytes.",
++                    ),
++                )
++                yield commands.CloseConnection(self.conn)
++                self.state = self.done
++                return
+             if request_head:
+                 try:
+                     self.request = http1.read_request_head(
+@@ -316,8 +344,6 @@ class Http1Server(Http1Connection):
+                 self.body_reader = make_body_reader(expected_body_size)
+                 self.state = self.read_body
+                 yield from self.state(event)
+-            else:
+-                pass  # FIXME: protect against header size DoS
+         elif isinstance(event, events.ConnectionClosed):
+             buf = bytes(self.buf)
+             if buf.strip():
+@@ -405,7 +431,19 @@ class Http1Client(Http1Connection):
+                 return
+             assert self.stream_id is not None
+ 
+-            response_head = self.buf.maybe_extract_lines()
++            try:
++                response_head = _extract_header_lines(self.buf)
++            except _Http1HeadersTooLarge:
++                yield commands.CloseConnection(self.conn)
++                yield ReceiveHttp(
++                    ResponseProtocolError(
++                        self.stream_id,
++                        f"HTTP/1 response headers exceeded {MAX_HTTP1_HEADER_BYTES} bytes.",
++                        ErrorCode.GENERIC_SERVER_ERROR,
++                    )
++                )
++                self.state = self.done
++                return
+             if response_head:
+                 try:
+                     self.response = http1.read_response_head(
+@@ -431,8 +469,6 @@ class Http1Client(Http1Connection):
+ 
+                 self.state = self.read_body
+                 yield from self.state(event)
+-            else:
+-                pass  # FIXME: protect against header size DoS
+         elif isinstance(event, events.ConnectionClosed):
+             if self.conn.state & ConnectionState.CAN_WRITE:
+                 yield commands.CloseConnection(self.conn)
+diff --git a/mitmproxy/proxy/layers/http/_http_h2.py b/mitmproxy/proxy/layers/http/_http_h2.py
+index d554eeb..e4efbd0 100644
+--- a/mitmproxy/proxy/layers/http/_http_h2.py
++++ b/mitmproxy/proxy/layers/http/_http_h2.py
+@@ -11,6 +11,8 @@ import h2.stream
+ 
+ logger = logging.getLogger(__name__)
+ 
++MAX_HTTP2_HEADER_LIST_BYTES = 64 * 1024
++
+ 
+ class H2ConnectionLogger(h2.config.DummyLogger):
+     def __init__(self, peername: tuple, conn_type: str):
+@@ -49,6 +51,10 @@ class BufferedH2Connection(h2.connection.H2Connection):
+ 
+     def __init__(self, config: h2.config.H2Configuration):
+         super().__init__(config)
++        # Do not rely on hyper-h2's default remaining bounded. This setting is
++        # both advertised to the peer and enforced against decompressed HPACK.
++        self.local_settings.max_header_list_size = MAX_HTTP2_HEADER_LIST_BYTES
++        self.decoder.max_header_list_size = MAX_HTTP2_HEADER_LIST_BYTES
+         self.local_settings.initial_window_size = 2**31 - 1
+         self.local_settings.max_frame_size = 2**17
+         self.max_inbound_frame_size = 2**17
+diff --git a/test/mitmproxy/proxy/layers/http/test_http1.py b/test/mitmproxy/proxy/layers/http/test_http1.py
+index 55c2fa5..06ffaf0 100644
+--- a/test/mitmproxy/proxy/layers/http/test_http1.py
++++ b/test/mitmproxy/proxy/layers/http/test_http1.py
+@@ -1,8 +1,11 @@
+ import pytest
+ 
+ from mitmproxy import http
++from mitmproxy.net.http import http1
++from mitmproxy.proxy.commands import CloseConnection
+ from mitmproxy.proxy.commands import SendData
+ from mitmproxy.proxy.events import DataReceived
++from mitmproxy.proxy.layers.http import ErrorCode
+ from mitmproxy.proxy.layers.http import Http1Client
+ from mitmproxy.proxy.layers.http import Http1Server
+ from mitmproxy.proxy.layers.http import ReceiveHttp
+@@ -12,11 +15,70 @@ from mitmproxy.proxy.layers.http import RequestHeaders
+ from mitmproxy.proxy.layers.http import ResponseData
+ from mitmproxy.proxy.layers.http import ResponseEndOfMessage
+ from mitmproxy.proxy.layers.http import ResponseHeaders
++from mitmproxy.proxy.layers.http import ResponseProtocolError
+ from test.mitmproxy.proxy.tutils import Placeholder
+ from test.mitmproxy.proxy.tutils import Playbook
+ 
++HEADER_LIMIT = 64 * 1024
++
++
++def sized_request_head(size: int) -> bytes:
++    prefix = b"POST / HTTP/1.1\r\nContent-Length: 3\r\nX-Pad: "
++    suffix = b"\r\n\r\n"
++    assert size >= len(prefix) + len(suffix)
++    head = prefix + b"a" * (size - len(prefix) - len(suffix)) + suffix
++    assert len(head) == size
++    return head
++
++
++def sized_response_head(size: int) -> bytes:
++    prefix = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nX-Pad: "
++    suffix = b"\r\n\r\n"
++    assert size >= len(prefix) + len(suffix)
++    head = prefix + b"a" * (size - len(prefix) - len(suffix)) + suffix
++    assert len(head) == size
++    return head
++
+ 
+ class TestServer:
++    def test_header_limit_exact_boundary_excludes_body(self, tctx):
++        assert (
++            Playbook(Http1Server(tctx))
++            >> DataReceived(tctx.client, sized_request_head(HEADER_LIMIT) + b"abc")
++            << ReceiveHttp(Placeholder(RequestHeaders))
++            << ReceiveHttp(RequestData(1, b"abc"))
++            << ReceiveHttp(RequestEndOfMessage(1))
++        )
++
++    def test_header_limit_rejects_before_parser(self, tctx, monkeypatch):
++        def parser_must_not_run(*_args, **_kwargs):
++            raise AssertionError("request parser called for oversized headers")
++
++        monkeypatch.setattr(http1, "read_request_head", parser_must_not_run)
++        response = Placeholder(bytes)
++        assert (
++            Playbook(Http1Server(tctx))
++            >> DataReceived(tctx.client, sized_request_head(HEADER_LIMIT + 1))
++            << SendData(tctx.client, response)
++            << CloseConnection(tctx.client)
++        )
++        assert response().startswith(b"HTTP/1.1 431")
++
++    def test_incomplete_header_is_bounded(self, tctx, monkeypatch):
++        def parser_must_not_run(*_args, **_kwargs):
++            raise AssertionError("request parser called for incomplete headers")
++
++        monkeypatch.setattr(http1, "read_request_head", parser_must_not_run)
++        response = Placeholder(bytes)
++        assert (
++            Playbook(Http1Server(tctx))
++            >> DataReceived(tctx.client, b"a" * HEADER_LIMIT)
++            >> DataReceived(tctx.client, b"a")
++            << SendData(tctx.client, response)
++            << CloseConnection(tctx.client)
++        )
++        assert response().startswith(b"HTTP/1.1 431")
++
+     @pytest.mark.parametrize("pipeline", ["pipeline", None])
+     def test_simple(self, tctx, pipeline):
+         hdrs1 = Placeholder(RequestHeaders)
+@@ -113,6 +175,39 @@ class TestServer:
+ 
+ 
+ class TestClient:
++    def test_header_limit_exact_boundary_excludes_body(self, tctx):
++        req = http.Request.make("GET", "http://example.com/")
++        assert (
++            Playbook(Http1Client(tctx))
++            >> RequestHeaders(1, req, True)
++            << SendData(tctx.server, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
++            >> RequestEndOfMessage(1)
++            >> DataReceived(tctx.server, sized_response_head(HEADER_LIMIT) + b"abc")
++            << ReceiveHttp(Placeholder(ResponseHeaders))
++            << ReceiveHttp(ResponseData(1, b"abc"))
++            << ReceiveHttp(ResponseEndOfMessage(1))
++        )
++
++    def test_header_limit_rejects_before_parser(self, tctx, monkeypatch):
++        req = http.Request.make("GET", "http://example.com/")
++
++        def parser_must_not_run(*_args, **_kwargs):
++            raise AssertionError("response parser called for oversized headers")
++
++        monkeypatch.setattr(http1, "read_response_head", parser_must_not_run)
++        error = Placeholder(ResponseProtocolError)
++        assert (
++            Playbook(Http1Client(tctx))
++            >> RequestHeaders(1, req, True)
++            << SendData(tctx.server, b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n")
++            >> RequestEndOfMessage(1)
++            >> DataReceived(tctx.server, sized_response_head(HEADER_LIMIT + 1))
++            << CloseConnection(tctx.server)
++            << ReceiveHttp(error)
++        )
++        assert error().code is ErrorCode.GENERIC_SERVER_ERROR
++        assert "exceeded 65536 bytes" in error().message
++
+     @pytest.mark.parametrize("pipeline", ["pipeline", None])
+     def test_simple(self, tctx, pipeline):
+         req = http.Request.make("GET", "http://example.com/")
+diff --git a/test/mitmproxy/proxy/layers/http/test_http2.py b/test/mitmproxy/proxy/layers/http/test_http2.py
+index e2b2b51..0db5b29 100644
+--- a/test/mitmproxy/proxy/layers/http/test_http2.py
++++ b/test/mitmproxy/proxy/layers/http/test_http2.py
+@@ -1,6 +1,10 @@
+ import time
+ from logging import DEBUG
+ 
++import h2.config
++import h2.connection
++import h2.events
++import h2.exceptions
+ import h2.settings
+ import hpack
+ import hyperframe.frame
+@@ -26,6 +30,7 @@ from mitmproxy.proxy.layers.http import ErrorCode
+ from mitmproxy.proxy.layers.http import HTTPMode
+ from mitmproxy.proxy.layers.http._http2 import Http2Client
+ from mitmproxy.proxy.layers.http._http2 import split_pseudo_headers
++from mitmproxy.proxy.layers.http._http_h2 import BufferedH2Connection
+ from test.mitmproxy.proxy.layers.http.hyper_h2_test_helpers import FrameFactory
+ from test.mitmproxy.proxy.tutils import Placeholder
+ from test.mitmproxy.proxy.tutils import Playbook
+@@ -44,6 +49,66 @@ example_request_trailers = ((b"req-trailer-a", b"a"), (b"req-trailer-b", b"b"))
+ 
+ example_response_trailers = ((b"resp-trailer-a", b"a"), (b"resp-trailer-b", b"b"))
+ 
++HEADER_LIST_LIMIT = 64 * 1024
++
++
++def sized_h2_headers(client_side: bool, size: int) -> list[tuple[bytes, bytes]]:
++    base = list(example_response_headers if client_side else example_request_headers)
++    base_size = sum(hpack.table.table_entry_size(*field) for field in base)
++    padding_name = b"x-pad"
++    padding_overhead = hpack.table.table_entry_size(padding_name, b"")
++    padding_size = size - base_size - padding_overhead
++    assert padding_size >= 0
++    headers = [*base, (padding_name, b"a" * padding_size)]
++    assert sum(hpack.table.table_entry_size(*field) for field in headers) == size
++    return headers
++
++
++def receive_sized_h2_headers(client_side: bool, size: int):
++    receiver = BufferedH2Connection(
++        h2.config.H2Configuration(client_side=client_side, header_encoding=False)
++    )
++    peer = h2.connection.H2Connection(
++        h2.config.H2Configuration(client_side=not client_side, header_encoding=False)
++    )
++    receiver.initiate_connection()
++    peer.initiate_connection()
++    receiver.receive_data(peer.data_to_send())
++    peer.receive_data(receiver.data_to_send())
++    receiver.receive_data(peer.data_to_send())
++
++    if client_side:
++        receiver.send_headers(1, example_request_headers, end_stream=True)
++        peer.receive_data(receiver.data_to_send())
++
++    peer.send_headers(1, sized_h2_headers(client_side, size), end_stream=True)
++    return receiver.receive_data(peer.data_to_send())
++
++
++@pytest.mark.parametrize("client_side", [False, True])
++def test_header_list_limit_is_explicit(client_side, monkeypatch):
++    monkeypatch.setattr(
++        h2.connection.H2Connection, "DEFAULT_MAX_HEADER_LIST_SIZE", 1024 * 1024
++    )
++    conn = BufferedH2Connection(h2.config.H2Configuration(client_side=client_side))
++    assert conn.local_settings.max_header_list_size == HEADER_LIST_LIMIT
++    assert conn.decoder.max_header_list_size == HEADER_LIST_LIMIT
++
++
++@pytest.mark.parametrize("client_side", [False, True])
++def test_header_list_limit_exact_boundary(client_side):
++    events = receive_sized_h2_headers(client_side, HEADER_LIST_LIMIT)
++    event_type = (
++        h2.events.ResponseReceived if client_side else h2.events.RequestReceived
++    )
++    assert any(isinstance(event, event_type) for event in events)
++
++
++@pytest.mark.parametrize("client_side", [False, True])
++def test_header_list_limit_rejects_decompressed_oversize(client_side):
++    with pytest.raises(h2.exceptions.DenialOfServiceError):
++        receive_sized_h2_headers(client_side, HEADER_LIST_LIMIT + 1)
++
+ 
+ @pytest.fixture
+ def open_h2_server_conn():

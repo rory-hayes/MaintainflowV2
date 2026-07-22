@@ -2,6 +2,31 @@ import AxeBuilder from "@axe-core/playwright"
 import { expect, test } from "@playwright/test"
 
 test.describe("Business Evals preview acceptance", () => {
+  test("Account signup starts with legal consent unselected and fails closed without it", async ({ page }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith("desktop"), "The consent interaction is covered once at the reference viewport")
+    await page.goto("/sign-up")
+
+    const consent = page.getByRole("checkbox", {
+      name: "I agree to the current Terms and acknowledge the Privacy Policy.",
+    })
+    await expect(consent).toBeVisible()
+    await expect(consent).not.toBeChecked()
+
+    await page.getByLabel("Name").fill("Legal Acceptance QA")
+    await page.getByLabel("Company or team").fill("Maintain Flow QA")
+    await page.getByLabel("Email").fill("legal-acceptance@maintainflow.io")
+    await page.getByLabel("Password").fill("correct-horse-battery-staple")
+    // Auth remains correctly disabled without a production Supabase provider.
+    // Submit the form directly so this acceptance check isolates the legal
+    // consent boundary instead of weakening provider fail-closed behavior.
+    await page.locator("form").evaluate((form: HTMLFormElement) => form.requestSubmit())
+
+    await expect(page.locator("#legal-consent-error")).toContainText("explicitly accept the current Terms")
+    await expect(consent).toBeFocused()
+    await expect(consent).not.toBeChecked()
+    await expect(page).toHaveURL(/\/sign-up/)
+  })
+
   test("Journey evidence and debug capture stay truthful", async ({ page }) => {
     await page.goto("/evals-preview")
 
@@ -36,9 +61,8 @@ test.describe("Business Evals preview acceptance", () => {
   })
 
   test("Product routes expose the project, incident, report and settings surfaces", async ({ page }) => {
-    // This test deliberately cold-compiles seven independent App Router pages
-    // under the local development server. Keep the individual assertions
-    // strict while allowing enough total time for those first compilations.
+    // Exercise seven independent App Router pages in the isolated production
+    // build while keeping every route assertion strict.
     test.setTimeout(180_000)
 
     const routes = [
@@ -56,6 +80,19 @@ test.describe("Business Evals preview acceptance", () => {
       await expect(page.getByRole("heading", { level: 1, name: route.heading })).toBeVisible()
       await expect(page.getByText(/Application error|Unhandled Runtime Error|Build Error/)).toHaveCount(0)
     }
+  })
+
+  test("Project menu is honest navigation rather than a cosmetic global filter", async ({ page }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith("desktop"), "Project-menu navigation is covered once at the reference viewport")
+    await page.goto("/journeys/lead-form")
+
+    await page.getByRole("button", { name: "Open project" }).click()
+    const northstar = page.getByRole("menuitem").filter({ hasText: "Northstar Studio" })
+    await expect(northstar).toHaveCount(1)
+    await northstar.click()
+
+    await expect(page).toHaveURL(/\/projects\/northstar$/)
+    await expect(page.getByRole("heading", { level: 1, name: "Northstar Studio" })).toBeVisible()
   })
 
   test("Lead builder reaches a supervised pass and daily schedule without preview API fallthrough", async ({ page }) => {
@@ -79,9 +116,8 @@ test.describe("Business Evals preview acceptance", () => {
     await page.getByRole("button", { name: "Start supervised run" }).click()
     await expect(page.getByText("Supervised proof passed")).toBeVisible({ timeout: 5_000 })
     await page.getByRole("button", { name: "Enable daily schedule" }).click()
-    // The dynamic Journey detail route is cold-compiled by the local Next.js
-    // development server. Keep the product assertion strict while allowing the
-    // compile to finish on clean machines and CI runners.
+    // Keep the dynamic Journey detail transition strict while allowing CI
+    // runners enough time to complete the preview mutation and navigation.
     await expect(page).toHaveURL(/\/journeys\/contact-lead-proof-/, { timeout: 45_000 })
     await expect(page.getByRole("heading", { level: 1, name: "Contact lead proof" })).toBeVisible()
     expect(browserErrors).toEqual([])

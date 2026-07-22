@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import { isCurrentSentryOrganizationToken } from "../scripts/lib/sentry-release-policy.mjs"
+import { isConcreteEnvValue } from "../scripts/lib/env-value-policy.mjs"
 
 const readiness = readFileSync("scripts/local-deploy-readiness.mjs", "utf8")
 const envPush = readFileSync("scripts/push-vercel-env.mjs", "utf8")
@@ -14,12 +16,35 @@ const deploymentRunbook = readFileSync("DEPLOYMENT_RUNBOOK.md", "utf8")
 const productionSmoke = readFileSync("scripts/production-smoke.mjs", "utf8")
 const documentationIndex = readFileSync("INDEX.md", "utf8")
 const features = readFileSync("src/lib/features/business-evals.ts", "utf8")
+const legalReleaseInputs = readFileSync("docs/business-evals/LEGAL_RELEASE_INPUTS.md", "utf8")
+
+test("Vercel redaction placeholders can never satisfy a release environment check", () => {
+  assert.equal(isConcreteEnvValue("actual-secret"), true)
+  assert.equal(isConcreteEnvValue("[SENSITIVE]"), false)
+  assert.equal(isConcreteEnvValue('"[SENSITIVE]"'), false)
+  assert.equal(isConcreteEnvValue("[REDACTED]"), false)
+  assert.equal(isConcreteEnvValue(""), false)
+})
+
+test("Sentry release policy accepts current base64 organization tokens", () => {
+  const currentToken = `sntrys_${Buffer.from("maintain-flow-v2-release-token").toString("base64")}_${"a".repeat(43)}`
+  assert.equal(isCurrentSentryOrganizationToken(currentToken), true)
+  assert.equal(isCurrentSentryOrganizationToken(`${currentToken}_extra`), false)
+  assert.equal(isCurrentSentryOrganizationToken("sntrys_not+canonical="), false)
+  assert.equal(isCurrentSentryOrganizationToken("sentry-personal-token"), false)
+})
 
 test("production release gates require every provider used by the canonical Business Evals offer", () => {
   for (const source of [readiness, envPush]) {
     for (const key of [
       "BROWSERBASE_API_KEY",
       "BROWSERBASE_EGRESS_PROXY_SERVER",
+      "BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID",
+      "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT",
+      "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT",
+      "BROWSERBASE_USAGE_WARNING_PERCENT",
+      "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS",
+      "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES",
       "RESEND_INBOUND_WEBHOOK_SECRET",
       "EVAL_EMAIL_LINK_ENCRYPTION_KEY_BASE64",
       "EVAL_CLEANUP_SIGNING_PRIVATE_KEY_BASE64",
@@ -29,6 +54,10 @@ test("production release gates require every provider used by the canonical Busi
       "STRIPE_PRICE_SOLO_ANNUAL",
       "STRIPE_PRICE_TEAM_ANNUAL",
       "STRIPE_PRICE_AGENCY_ANNUAL",
+      "NEXT_PUBLIC_SENTRY_DSN",
+      "SENTRY_AUTH_TOKEN",
+      "SENTRY_ORG",
+      "SENTRY_PROJECT",
     ]) assert.match(source, new RegExp(key))
   }
   assert.doesNotMatch(readiness, /providers are not complete[\s\S]+add\("WARN"/)
@@ -40,6 +69,23 @@ test("production release gates require every provider used by the canonical Busi
     assert.match(source, /SUPABASE_AUTH_GOOGLE_OAUTH_CONFIRMED/)
   }
   assert.doesNotMatch(envPush, /"GOOGLE_CLIENT_SECRET"/)
+  for (const source of [readiness, envPush]) {
+    assert.match(source, /public-key-only Sentry ingest DSN/)
+    assert.match(source, /SENTRY_AUTH_TOKEN/)
+    assert.match(source, /SENTRY_URL/)
+  }
+  for (const source of [readiness, envPush]) {
+    assert.match(source, /NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE/)
+    assert.match(source, /local-development-only/)
+    assert.match(source, /inbound\.maintainflow\.io/)
+    assert.match(source, /EVAL_SYNTHETIC_EMAIL_DOMAIN must be example\.invalid/)
+    assert.match(source, /BROWSER_CONTEXT_CLEANUP_BATCH_SIZE must be between 1 and 4/)
+  }
+  assert.match(envPush, /alwaysRetiredKeys/)
+  assert.match(readiness, /project\.projectId === canonicalVercelProjectId/)
+  assert.match(readiness, /project\.orgId === canonicalVercelOrgId/)
+  assert.match(readiness, /prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE/)
+  assert.match(readiness, /team_0TBtz8vO6Cqygx11eRM5tg9D/)
 })
 
 test("canary and launch have separate fail-closed checks and pushes", () => {
@@ -60,7 +106,8 @@ test("canary and launch have separate fail-closed checks and pushes", () => {
   assert.match(envPush, /keysToRemove = releaseStage === "launch"/)
   assert.match(envPush, /"BUSINESS_EVALS_WORKSPACE_ALLOWLIST", "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET", "BUSINESS_EVALS_FIXTURE_FROM_EMAIL"/)
   assert.match(envPush, /!keysToRemove\.includes\(key\)/)
-  assert.match(envPush, /\["env", "add", key, environment, "--force", "--yes"/)
+  assert.match(envPush, /\["env", "add", key, environment, "--force", "--yes", sensitivityFlag/)
+  assert.match(envPush, /isSensitiveEnvKey\(key\) \? "--sensitive" : "--no-sensitive"/)
   assert.doesNotMatch(envPush, /\["env", "update"/)
   assert.doesNotMatch(envPush, /already exists[\s\S]+continue/)
   assert.match(envPush, /vercel@56\.3\.2/)
@@ -76,8 +123,12 @@ test("canary and launch have separate fail-closed checks and pushes", () => {
   assert.match(runbook, /https:\/\/maintainflow-v2\.vercel\.app/)
   assert.match(runbook, /https:\/\/maintainflow-v2\.vercel\.app\/auth\/callback/)
   assert.match(runbook, /https:\/\/maintainflow-v2\.vercel\.app\/reset-password/)
+  assert.match(runbook, /https:\/\/maintainflow-v2\.vercel\.app\/auth\/confirm/)
+  assert.match(runbook, /do not use a wildcard/)
   assert.match(runbook, /do not replace the canonical Site URL with the canary origin/)
   assert.match(runbook, /unauthenticated application response/)
+  assert.match(runbook, /BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID/)
+  assert.match(runbook, /proxySettings\.caCertificates/)
   assert.match(productionSmoke, /releaseStage === "canary"[\s\S]*https:\/\/maintainflow-v2\.vercel\.app/)
   assert.match(productionSmoke, /--stage must be canary or launch/)
   assert.match(productionSmoke, /SMOKE_ALLOW_NONCANONICAL_TARGET/)
@@ -85,9 +136,16 @@ test("canary and launch have separate fail-closed checks and pushes", () => {
   assert.doesNotMatch(productionSmoke, /process\.env\.PRODUCTION_URL|process\.env\.NEXT_PUBLIC_APP_URL/)
   assert.match(productionSmoke, /\/api\/webhooks\/resend\/inbound/)
   assert.match(productionSmoke, /\/api\/billing\/webhook/)
+  assert.match(productionSmoke, /\/api\/cron\/cleanup-browser-contexts/)
   assert.match(runbook, /Only then point `www\.maintainflow\.io`/)
   assert.match(runbook, /SMOKE_PRODUCTION_URL=https:\/\/maintainflow-v2\.vercel\.app/)
   assert.match(runbook, /SMOKE_ALLOW_NONCANONICAL_TARGET=1/)
+})
+
+test("Vercel env publishing removes CLI dotenv quotes before validation and upload", () => {
+  assert.match(envPush, /stripQuotes\(line\.slice\(separator \+ 1\)\)/)
+  assert.match(envPush, /function stripQuotes\(value\)/)
+  assert.match(envPush, /key\.endsWith\("_MIN_LENGTH"\)/)
 })
 
 test("release helpers preserve annual legacy reconciliation and validate the public Stripe matrix", () => {
@@ -131,4 +189,19 @@ test("the retired marketing flag cannot silently restore the old public product"
   for (const source of [features, envExample, providerChecklist]) {
     assert.doesNotMatch(source, /BUSINESS_EVALS_MARKETING_ENABLED/)
   }
+})
+
+test("public launch remains blocked on real legal operator facts and reviewed data-flow terms", () => {
+  for (const value of [
+    "contracting legal name",
+    "postal address",
+    "Governing law",
+    "Article 6 legal-basis map",
+    "international transfers",
+    "supervisory-authority complaint route",
+    "Data Processing Addendum",
+    "qualified adviser",
+  ]) assert.match(legalReleaseInputs, new RegExp(value, "i"))
+  assert.match(providerChecklist, /LEGAL_RELEASE_INPUTS\.md/)
+  assert.match(deploymentRunbook, /Legal completion is equally blocking/)
 })

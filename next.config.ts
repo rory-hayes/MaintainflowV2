@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withSentryConfig } from "@sentry/nextjs";
 import { withWorkflow } from "workflow/next";
 import { buildProductionSecurityHeaders } from "./src/lib/security/headers.ts";
 
@@ -27,4 +28,15 @@ export const baseNextConfig: NextConfig = {
   },
 };
 
-export default withWorkflow(baseNextConfig);
+export default withSentryConfig(withWorkflow(baseNextConfig), {
+  sentryUrl: "https://sentry.io",
+  telemetry: false,
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  silent: !process.env.CI,
+  widenClientFileUpload: true,
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
+});

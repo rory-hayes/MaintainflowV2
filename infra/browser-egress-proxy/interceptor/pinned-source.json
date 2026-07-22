@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "upstream": {
+    "repository": "https://github.com/mitmproxy/mitmproxy.git",
+    "tag": "v12.2.3",
+    "commit": "6c09d56e4c29a92f5ad01b03199977584b8ea14f"
+  },
+  "limits": {
+    "http1_raw_header_bytes": 65536,
+    "http2_decompressed_header_list_bytes": 65536
+  },
+  "dependency_contract": {
+    "h11": "0.16.0",
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0",
+    "msgpack": "1.2.1",
+    "tornado": "6.5.6"
+  },
+  "mitmproxy_metadata_contract": [
+    "msgpack<=1.2.1,>=1.0.0",
+    "tornado<=6.5.6,>=6.5.0"
+  ],
+  "mitmproxy_patches": [
+    {
+      "name": "preparse-header-limits",
+      "path": "patches/mitmproxy-12.2.3-header-limits.patch",
+      "sha256": "a8c041684da1f5e54e73a8e2b2b4136f93feb61a6bb609517db52759f704a90b",
+      "files": [
+        {
+          "path": "mitmproxy/proxy/layers/http/_http1.py",
+          "before_sha256": "a2ed8918f1c4a0704715a6881acc82249a92ff147909f250a22a7a2edb0aa6ee",
+          "after_sha256": "6ea951ce814f4bc63c656767b3912e64fb6439325983347018d8b2cb9b47f536"
+        },
+        {
+          "path": "mitmproxy/proxy/layers/http/_http_h2.py",
+          "before_sha256": "62b992b8e61893a69e673c6bb54753a12cb7171b6a3ed7865718e116b13d8559",
+          "after_sha256": "d3b8d45c3f55247e1db1af523d53cc17aaedd60a10f1add51b5072bae53c1d48"
+        },
+        {
+          "path": "test/mitmproxy/proxy/layers/http/test_http1.py",
+          "before_sha256": "daf11371990add96dd2c05ec72f1cfafdc2ea9634d241a46ec637a8bd0c4145d",
+          "after_sha256": "36d9485c077a43df2226a892133beeda8900afdea148a2f00832c9fe76c7deda"
+        },
+        {
+          "path": "test/mitmproxy/proxy/layers/http/test_http2.py",
+          "before_sha256": "4c2430c931d4790d8385cb29f99e343d8016ae05adaa913f189e0db5eb6a519e",
+          "after_sha256": "c66ff3469c7eec32a3ca889fc762443744cd01bb4edd7d4068df93e57e6fe628"
+        }
+      ]
+    },
+    {
+      "name": "cumulative-stream-body-limits",
+      "path": "patches/mitmproxy-12.2.3-stream-body-limits.patch",
+      "sha256": "19048099f2bcbc4ac68e21c9af9c03446c023e4c2f639a6b90555c93f5cb7995",
+      "files": [
+        {
+          "path": "mitmproxy/proxy/layers/http/__init__.py",
+          "before_sha256": "0e7b3474f7febddcf81cb69685f3cd9a3b7af9c849ae47925add565e9ed67d4c",
+          "after_sha256": "df448b9b335d198ee69f88c5cb08efabf2c95bdcdb227b69530f5051de2740c0"
+        },
+        {
+          "path": "test/mitmproxy/proxy/layers/http/test_http.py",
+          "before_sha256": "191360a6556be985d01768c9676e0b74127332bf93a3c883102fcb22e25f37ea",
+          "after_sha256": "4d505f7785ffea9f76988397b06bc592fd167a8c938c5f8a5040ae07efcd5142"
+        }
+      ]
+    },
+    {
+      "name": "security-dependency-bounds",
+      "path": "patches/mitmproxy-12.2.3-security-dependency-bounds.patch",
+      "sha256": "61ac7cf0b13018ee8a48a40f0a988ed2256025768cc6518fd41b5fd849a2e693",
+      "files": [
+        {
+          "path": "pyproject.toml",
+          "before_sha256": "0253adc7342df14599b2afc094301864698274c9e1514412c8f1507a18889570",
+          "after_sha256": "452678cd9525796f7a36849c7ec105d23a2a05b3e3a9f81f9f110e7e84123e9b"
+        }
+      ]
+    }
+  ],
+  "h11_source": {
+    "version": "0.16.0",
+    "sdist_url": "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz",
+    "sdist_sha256": "4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1",
+    "patch": {
+      "path": "patches/h11-0.16.0-chunk-framing-limits.patch",
+      "sha256": "5056081d546674963ccba1b1b16068bac863bba4b882651730949111702eb6ab",
+      "files": [
+        {
+          "path": "h11/_readers.py",
+          "before_sha256": "6b8472a4e454082dddd2afe4c4fb8120cee34c3f222ede57f754c7d05b1db8de",
+          "after_sha256": "0d4e583606ac6845222dcdcac3b690287fcc3ea76187b65a4867e4304b19fe4c"
+        },
+        {
+          "path": "h11/_receivebuffer.py",
+          "before_sha256": "c6bb29b1db0d81617145f41c4d7c51f11add8d15d74cad08a39710616a49d56b",
+          "after_sha256": "e23c291dffa2149e2bcf6a994a31a3e7e4b19353b68b4615e560bc7631c1a74c"
+        },
+        {
+          "path": "h11/tests/test_io.py",
+          "before_sha256": "3dc9f8ff1057766a0cdbb968e3a333645bc03c9dc89814c500f3eceda6a81835",
+          "after_sha256": "0b6f88392e17d51504b1e42ace3d99facf24ec1016670239fd4bffe33728f673"
+        }
+      ]
+    },
+    "focused_tests": [
+      "h11/tests/test_receivebuffer.py",
+      "h11/tests/test_io.py"
+    ]
+  },
+  "focused_tests": [
+    "test/mitmproxy/proxy/layers/http/test_http1.py::TestServer::test_header_limit_exact_boundary_excludes_body",
+    "test/mitmproxy/proxy/layers/http/test_http1.py::TestServer::test_header_limit_rejects_before_parser",
+    "test/mitmproxy/proxy/layers/http/test_http1.py::TestServer::test_incomplete_header_is_bounded",
+    "test/mitmproxy/proxy/layers/http/test_http1.py::TestClient::test_header_limit_exact_boundary_excludes_body",
+    "test/mitmproxy/proxy/layers/http/test_http1.py::TestClient::test_header_limit_rejects_before_parser",
+    "test/mitmproxy/proxy/layers/http/test_http2.py::test_header_list_limit_is_explicit",
+    "test/mitmproxy/proxy/layers/http/test_http2.py::test_header_list_limit_exact_boundary",
+    "test/mitmproxy/proxy/layers/http/test_http2.py::test_header_list_limit_rejects_decompressed_oversize",
+    "test/mitmproxy/proxy/layers/http/test_http.py::test_maintainflow_streamed_actual_body_limit",
+    "test/mitmproxy/proxy/layers/http/test_http.py::test_maintainflow_streamed_actual_body_exact_boundary",
+    "test/mitmproxy/proxy/layers/http/test_http.py::test_maintainflow_stream_transform_cannot_expand_past_limit"
+  ]
+}

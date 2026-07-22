@@ -7,8 +7,8 @@ import { bearerToken, getReportDownloadConfig, loadAuthorizedReportPdf } from ".
 
 const config = getReportDownloadConfig({
   NEXT_PUBLIC_SUPABASE_URL: "https://maintainflow.supabase.test",
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-test-key",
-  SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: "sb_publishable_test_public_key_1234567890",
+  SUPABASE_SERVICE_ROLE_KEY: "sb_secret_test_server_key_1234567890",
 })
 
 test("report download requires a bearer token", () => {
@@ -111,8 +111,8 @@ test("report download streams only the current snapshot-bound agency PDF", async
     const href = String(url)
     calls.push(href)
     if (href.includes("/storage/v1/object/")) {
-      assert.equal(headersToRecord(init?.headers).authorization, "Bearer service-role-key")
-      assert.equal(headersToRecord(init?.headers).apikey, "service-role-key")
+      assert.equal(headersToRecord(init?.headers).authorization, undefined)
+      assert.equal(headersToRecord(init?.headers).apikey, "sb_secret_test_server_key_1234567890")
       return new Response("pdf-bytes", {
         status: 200,
         headers: { "content-type": "application/pdf" },

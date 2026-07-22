@@ -4,6 +4,7 @@ import { BrandMark } from "@/components/brand/brand-mark"
 import { authLightThemeStyle } from "@/components/auth/auth-light-theme"
 import { Button } from "@/components/ui/button"
 import { ButtonLink } from "@/components/ui/button-link"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Card,
   CardContent,
@@ -14,18 +15,29 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { requestLocalPasswordReset, resetLocalPassword } from "@/lib/auth-storage"
-import { completeSupabasePasswordResetFromLocation, requestSupabasePasswordReset } from "@/lib/supabase/auth"
+import {
+  currentLegalAcceptance,
+  MAINTAINFLOW_PRIVACY_LAST_UPDATED,
+  MAINTAINFLOW_TERMS_LAST_UPDATED,
+} from "@/lib/legal/acceptance"
+import {
+  captureAndScrubPasswordResetLocation,
+  completeSupabasePasswordResetFromLocation,
+  requestSupabasePasswordReset,
+  type PasswordResetLocationSnapshot,
+} from "@/lib/supabase/auth"
 import { getSupabaseConfig } from "@/lib/supabase/config"
 import { IconArrowLeft, IconArrowRight, IconMail, IconShieldLock } from "@tabler/icons-react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
-import { type FormEvent, useState } from "react"
+import { type FormEvent, useLayoutEffect, useRef, useState } from "react"
 
 type PasswordResetCardProps = {
   mode: "forgot" | "reset"
 }
 
 export function PasswordResetCard({ mode }: PasswordResetCardProps) {
+  const capturedResetRef = useRef(false)
   const searchParams = useSearchParams()
   const [submitted, setSubmitted] = useState(false)
   const [email, setEmail] = useState(searchParams.get("email") ?? "")
@@ -34,18 +46,52 @@ export function PasswordResetCard({ mode }: PasswordResetCardProps) {
   const [confirmPassword, setConfirmPassword] = useState("")
   const [resetPath, setResetPath] = useState("")
   const [error, setError] = useState("")
+  const [legalAccepted, setLegalAccepted] = useState(false)
+  const [legalError, setLegalError] = useState("")
+  const [resetLocation, setResetLocation] = useState<PasswordResetLocationSnapshot | null>(null)
   const isReset = mode === "reset"
   const useSupabase = getSupabaseConfig().enabled
+
+  useLayoutEffect(() => {
+    if (!isReset || capturedResetRef.current) return
+    capturedResetRef.current = true
+
+    try {
+      const location = captureAndScrubPasswordResetLocation(window.location, window.history)
+      setResetLocation(location)
+    } catch {
+      setError("This password link could not be secured in this browser. Request a new link.")
+    }
+  }, [isReset])
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError("")
+    setLegalError("")
 
     try {
       if (isReset) {
         if (useSupabase) {
-          await completeSupabasePasswordResetFromLocation(window.location, { password, confirmPassword })
-          window.history.replaceState(null, "", "/reset-password")
+          if (!resetLocation) {
+            setError("This password link is not ready. Request a new link if the problem continues.")
+            return
+          }
+          if (!legalAccepted) {
+            setLegalError("Explicitly accept the current Terms and acknowledge the Privacy Policy before setting your password.")
+            document.getElementById("reset-legal-consent")?.focus()
+            return
+          }
+          const securedResetLocation = resetLocation
+          if (new URLSearchParams(securedResetLocation.hash.replace(/^#/, "")).has("token_hash")) {
+            setResetLocation(null)
+          }
+          await completeSupabasePasswordResetFromLocation(securedResetLocation, {
+            password,
+            confirmPassword,
+            legalAcceptance: currentLegalAcceptance("password_reset"),
+          })
+          setPassword("")
+          setConfirmPassword("")
           setSubmitted(true)
           return
         }
@@ -88,7 +134,7 @@ export function PasswordResetCard({ mode }: PasswordResetCardProps) {
             <CardDescription>
               {isReset
                 ? useSupabase
-                  ? "Use the reset link from your email to set a new password."
+                  ? "Use the reset or invitation link from your email in any current browser. Maintain Flow will ask you to sign in again when it is done."
                   : "Use a valid reset link to set a new password."
                 : useSupabase
                   ? "Enter your account email and Maintain Flow will send a reset link."
@@ -111,7 +157,7 @@ export function PasswordResetCard({ mode }: PasswordResetCardProps) {
                       required
                     />
                     <FieldDescription>
-                      Maintain Flow will create a password reset link for this account.
+                      Maintain Flow will send a password reset link if this address has an account. You can open it in any current browser or device.
                     </FieldDescription>
                     <FieldDescription className="text-destructive">{error}</FieldDescription>
                   </Field>
@@ -138,8 +184,10 @@ export function PasswordResetCard({ mode }: PasswordResetCardProps) {
                   <Field>
                     <FieldDescription className="text-primary">
                       {isReset
-                        ? "Password updated. Return to sign in."
-                        : "Reset link created:"}
+                        ? "Password updated and the temporary email-link session was revoked. Sign in to continue."
+                        : useSupabase
+                          ? "If this address has an account, its reset email is on the way."
+                          : "Reset link created:"}
                     </FieldDescription>
                     {!isReset && resetPath ? (
                       <Link className="text-sm text-primary underline-offset-4 hover:underline" href={resetPath}>
@@ -149,8 +197,40 @@ export function PasswordResetCard({ mode }: PasswordResetCardProps) {
                   </Field>
                 ) : null}
               </FieldGroup>
+              {isReset && useSupabase ? (
+                <div className={`rounded-lg border p-4 ${legalError ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/30"}`}>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="reset-legal-consent"
+                      checked={legalAccepted}
+                      aria-invalid={Boolean(legalError)}
+                      aria-describedby={`reset-legal-consent-description${legalError ? " reset-legal-consent-error" : ""}`}
+                      onCheckedChange={(value) => {
+                        setLegalAccepted(value === true)
+                        setLegalError("")
+                      }}
+                      className="mt-0.5"
+                    />
+                    <div className="min-w-0">
+                      <label className="cursor-pointer text-sm font-medium leading-6" htmlFor="reset-legal-consent">
+                        I agree to the current Terms and acknowledge the Privacy Policy.
+                      </label>
+                      <p id="reset-legal-consent-description" className="mt-1 text-xs leading-5 text-muted-foreground">
+                        Required for invitation activation and password recovery. Read the{" "}
+                        <Link className="font-medium text-primary hover:underline" href="/terms">Terms</Link> ({MAINTAINFLOW_TERMS_LAST_UPDATED}) and{" "}
+                        <Link className="font-medium text-primary hover:underline" href="/privacy">Privacy Policy</Link> ({MAINTAINFLOW_PRIVACY_LAST_UPDATED}). This box is never selected for you.
+                      </p>
+                    </div>
+                  </div>
+                  {legalError ? (
+                    <p id="reset-legal-consent-error" role="alert" className="mt-3 text-xs font-medium leading-5 text-destructive">
+                      {legalError}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="flex flex-col gap-3">
-                <Button type="submit">
+                <Button type="submit" disabled={isReset && !resetLocation}>
                   {isReset ? <IconShieldLock data-icon="inline-start" /> : <IconMail data-icon="inline-start" />}
                   {isReset ? "Set password" : "Send reset link"}
                   <IconArrowRight data-icon="inline-end" />

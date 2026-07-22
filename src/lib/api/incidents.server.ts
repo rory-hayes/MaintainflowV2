@@ -106,29 +106,23 @@ export async function mutateIncident(input: {
     patch.status = "snoozed"
     patch.snoozed_until = input.mutation.until
   } else {
-    patch.status = "in_review"
-    patch.repair_recorded_at = now
-    patch.resolved_at = null
-    patch.verification_eval_run_id = null
-    patch.verification_run_id = null
-    patch.resolution_note = input.mutation.note
-    patch.report_safe_summary = input.mutation.note
-    patch.snoozed_until = null
-    await supabaseServiceJson("issue_notes", {
+    const rows = await supabaseServiceJson<Row[]>("rpc/record_business_eval_incident_repair", {
       method: "POST",
-      prefer: "return=minimal",
       body: JSON.stringify({
-        agency_id: input.agencyId,
-        issue_id: input.incidentId,
-        user_id: input.userId,
-        body: input.mutation.note,
-        report_safe: true,
+        p_agency_id: input.agencyId,
+        p_issue_id: input.incidentId,
+        p_user_id: input.userId,
+        p_expected_updated_at: incident.updatedAt,
+        p_note: input.mutation.note,
       }),
     })
+    if (!rows[0]) throw new BusinessEvalsApiError(409, "INCIDENT_UPDATE_CONFLICT", "The incident changed before its repair could be recorded.")
+    return getIncident(input.agencyId, incident.id)
   }
   const rows = await supabaseServiceJson<Row[]>(`issues?${query({
     agency_id: `eq.${input.agencyId}`,
     id: `eq.${input.incidentId}`,
+    updated_at: `eq.${incident.updatedAt}`,
     select: "id",
   })}`, { method: "PATCH", body: JSON.stringify(patch) })
   if (!rows[0]) throw new BusinessEvalsApiError(409, "INCIDENT_UPDATE_CONFLICT", "The incident changed before it could be updated.")

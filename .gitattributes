@@ -1,2 +1,4 @@
 docs/outreach/demo-recordings/*.mp4 filter=lfs diff=lfs merge=lfs -text
 docs/outreach/demo-recordings/*.m4v filter=lfs diff=lfs merge=lfs -text
+infra/browser-egress-proxy/interceptor/patches/*.patch whitespace=-trailing-space
+infra/browser-egress-proxy/policy/iana-*-special-registry.xml whitespace=-trailing-space

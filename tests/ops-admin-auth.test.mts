@@ -36,10 +36,14 @@ test("ops admin auth accepts a signed in allowlisted Supabase user", async () =>
     env: { OPS_ADMIN_EMAILS: "alex@example.com" },
     fetchImpl: (async (url, init) => {
       const headers = new Headers(init?.headers)
-      assert.equal(String(url), "https://maintainflow.supabase.test/auth/v1/user")
       assert.equal(headers.get("authorization"), "Bearer access-token")
-      assert.equal(headers.get("apikey"), "anon-test-key")
-      return Response.json({ id: "00000000-0000-4000-8000-000000000001", email: "alex@example.com" })
+      assert.equal(headers.get("apikey"), "sb_publishable_test_public_key_1234567890")
+      if (String(url) === "https://maintainflow.supabase.test/auth/v1/user") {
+        return Response.json({ id: "00000000-0000-4000-8000-000000000001", email: "alex@example.com" })
+      }
+      assert.equal(String(url), "https://maintainflow.supabase.test/rest/v1/rpc/current_auth_account_activation_status")
+      assert.equal(init?.method, "POST")
+      return Response.json([{ activation_required: false, activation_complete: true }])
     }) as typeof fetch,
   })
 
@@ -56,7 +60,9 @@ test("ops admin auth rejects signed in users outside the allowlist", async () =>
   withSupabaseEnv()
   const result = await authorizeOpsRequest("Bearer access-token", {
     env: { OPS_ADMIN_EMAILS: "alex@example.com" },
-    fetchImpl: (async () => Response.json({ id: "user-2", email: "member@example.com" })) as typeof fetch,
+    fetchImpl: (async (url) => String(url).endsWith("/auth/v1/user")
+      ? Response.json({ id: "user-2", email: "member@example.com" })
+      : Response.json([{ activation_required: false, activation_complete: true }])) as typeof fetch,
   })
 
   assert.deepEqual(result, {
@@ -70,5 +76,5 @@ function withSupabaseEnv() {
   process.env.NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE = ""
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://maintainflow.supabase.test"
   process.env.NEXT_PUBLIC_SUPABASE_AUTH_URL = ""
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-test-key"
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "sb_publishable_test_public_key_1234567890"
 }

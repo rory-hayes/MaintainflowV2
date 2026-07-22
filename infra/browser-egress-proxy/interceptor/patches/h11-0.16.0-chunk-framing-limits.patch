@@ -1,0 +1,191 @@
+diff --git a/h11/_readers.py b/h11/_readers.py
+index 576804c..85cc9e5 100644
+--- a/h11/_readers.py
++++ b/h11/_readers.py
+@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Iterable, NoReturn, Optional, Tuple, Typ
+ 
+ from ._abnf import chunk_header, header_field, request_line, status_line
+ from ._events import Data, EndOfMessage, InformationalResponse, Request, Response
+-from ._receivebuffer import ReceiveBuffer
++from ._receivebuffer import ReceiveBuffer, ReceiveBufferLimitExceeded
+ from ._state import (
+     CLIENT,
+     CLOSED,
+@@ -144,6 +144,11 @@ class ContentLengthReader:
+ 
+ chunk_header_re = re.compile(chunk_header.encode("ascii"))
+ 
++# Maintain Flow's exact-source patch bounds the two delimiter-framed sections
++# that otherwise accumulate independently of HTTP header and body limits.
++MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES = 64 * 1024
++MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES = 64 * 1024
++
+ 
+ class ChunkedReader:
+     def __init__(self) -> None:
+@@ -155,7 +160,14 @@ class ChunkedReader:
+ 
+     def __call__(self, buf: ReceiveBuffer) -> Union[Data, EndOfMessage, None]:
+         if self._reading_trailer:
+-            lines = buf.maybe_extract_lines()
++            try:
++                lines = buf.maybe_extract_lines(
++                    max_bytes=MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES
++                )
++            except ReceiveBufferLimitExceeded as error:
++                raise LocalProtocolError(
++                    "chunk trailer block exceeds the configured limit"
++                ) from error
+             if lines is None:
+                 return None
+             return EndOfMessage(headers=list(_decode_header_lines(lines)))
+@@ -174,7 +186,14 @@ class ChunkedReader:
+         assert self._bytes_to_discard == b""
+         if self._bytes_in_chunk == 0:
+             # We need to refill our chunk count
+-            chunk_header = buf.maybe_extract_next_line()
++            try:
++                chunk_header = buf.maybe_extract_next_line(
++                    max_bytes=MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES
++                )
++            except ReceiveBufferLimitExceeded as error:
++                raise LocalProtocolError(
++                    "chunk header and extensions exceed the configured limit"
++                ) from error
+             if chunk_header is None:
+                 return None
+             matches = validate(
+diff --git a/h11/_receivebuffer.py b/h11/_receivebuffer.py
+index e5c4e08..760366a 100644
+--- a/h11/_receivebuffer.py
++++ b/h11/_receivebuffer.py
+@@ -5,6 +5,10 @@ from typing import List, Optional, Union
+ __all__ = ["ReceiveBuffer"]
+ 
+ 
++class ReceiveBufferLimitExceeded(ValueError):
++    """Raised before extracting an over-limit delimiter-framed section."""
++
++
+ # Operations we want to support:
+ # - find next \r\n or \r\n\r\n (\n or \n\n are also acceptable),
+ #   or wait until there is one
+@@ -84,7 +88,9 @@ class ReceiveBuffer:
+ 
+         return self._extract(count)
+ 
+-    def maybe_extract_next_line(self) -> Optional[bytearray]:
++    def maybe_extract_next_line(
++        self, max_bytes: Optional[int] = None
++    ) -> Optional[bytearray]:
+         """
+         Extract the first line, if it is completed in the buffer.
+         """
+@@ -94,14 +100,21 @@ class ReceiveBuffer:
+ 
+         if partial_idx == -1:
+             self._next_line_search = len(self._data)
++            if max_bytes is not None and len(self._data) > max_bytes:
++                raise ReceiveBufferLimitExceeded
+             return None
+ 
+         # + 2 is to compensate len(b"\r\n")
+         idx = partial_idx + 2
+ 
++        if max_bytes is not None and idx > max_bytes:
++            raise ReceiveBufferLimitExceeded
++
+         return self._extract(idx)
+ 
+-    def maybe_extract_lines(self) -> Optional[List[bytearray]]:
++    def maybe_extract_lines(
++        self, max_bytes: Optional[int] = None
++    ) -> Optional[List[bytearray]]:
+         """
+         Extract everything up to the first blank line, and return a list of lines.
+         """
+@@ -118,10 +131,14 @@ class ReceiveBuffer:
+         match = blank_line_regex.search(self._data, self._multiple_lines_search)
+         if match is None:
+             self._multiple_lines_search = max(0, len(self._data) - 2)
++            if max_bytes is not None and len(self._data) > max_bytes:
++                raise ReceiveBufferLimitExceeded
+             return None
+ 
+         # Truncate the buffer and return it.
+         idx = match.span(0)[-1]
++        if max_bytes is not None and idx > max_bytes:
++            raise ReceiveBufferLimitExceeded
+         out = self._extract(idx)
+         lines = out.split(b"\n")
+ 
+diff --git a/h11/tests/test_io.py b/h11/tests/test_io.py
+index 407e044..480f092 100644
+--- a/h11/tests/test_io.py
++++ b/h11/tests/test_io.py
+@@ -473,6 +473,64 @@ def test_ChunkedReader() -> None:
+     t_body_reader(ChunkedReader, b"3\r\nxxx_\n1a\r\n", [LocalProtocolError])
+ 
+ 
++def test_chunk_header_limit_exact_boundary_and_trailing_body() -> None:
++    from .._readers import MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES
++
++    line = (
++        b"1;"
++        + b"a" * (MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES - len(b"1;\r\n"))
++        + b"\r\n"
++    )
++    buf = makebuf(line + b"x\r\n0\r\n\r\ntrailing")
++    assert _run_reader(ChunkedReader(), buf, False) == [
++        Data(data=b"x"),
++        EndOfMessage(),
++    ]
++    assert bytes(buf) == b"trailing"
++
++
++def test_chunk_header_limit_rejects_slow_fragment_before_parse() -> None:
++    from .._readers import MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES
++
++    reader = ChunkedReader()
++    buf = makebuf(b"1;" + b"a" * (MAINTAINFLOW_MAX_CHUNK_HEADER_BYTES - 2))
++    assert reader(buf) is None
++    buf += b"a"
++    with pytest.raises(LocalProtocolError, match="chunk header"):
++        reader(buf)
++
++
++def test_chunk_trailer_limit_exact_boundary_and_trailing_bytes() -> None:
++    from .._readers import MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES
++
++    reader = ChunkedReader()
++    buf = makebuf(b"0\r\n")
++    assert reader(buf) is None
++    trailer = (
++        b"x:"
++        + b"a" * (MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES - len(b"x:\r\n\r\n"))
++        + b"\r\n\r\n"
++    )
++    buf += trailer + b"trailing"
++    event = reader(buf)
++    assert isinstance(event, EndOfMessage)
++    assert event.headers == [(b"x", b"a" * (len(trailer) - len(b"x:\r\n\r\n")))]
++    assert bytes(buf) == b"trailing"
++
++
++def test_chunk_trailer_limit_rejects_slow_fragment_before_parse() -> None:
++    from .._readers import MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES
++
++    reader = ChunkedReader()
++    buf = makebuf(b"0\r\n")
++    assert reader(buf) is None
++    buf += b"x:" + b"a" * (MAINTAINFLOW_MAX_CHUNK_TRAILER_BYTES - 2)
++    assert reader(buf) is None
++    buf += b"a"
++    with pytest.raises(LocalProtocolError, match="trailer"):
++        reader(buf)
++
++
+ def test_ContentLengthWriter() -> None:
+     w = ContentLengthWriter(5)
+     assert dowrite(w, Data(data=b"123")) == b"123"
+

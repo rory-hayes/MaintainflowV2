@@ -39,8 +39,8 @@ test("email confirmation and Google OAuth preserve the same safe onboarding path
   assert.match(authCard, /readPublicSignupIntent\(params\)/)
   assert.match(authCard, /checkout never opens and you are never charged automatically/)
   assert.match(authCard, /\{plan\}\{interval\} · \{template\} selected/)
-  assert.match(authCard, /signUp\(\{ \.\.\.signupInput, nextPath \}\)/)
-  assert.match(authCard, /signInWithGoogle\(\{ nextPath \}\)/)
+  assert.match(authCard, /signUp\(\{[\s\S]+\.\.\.signupInput,[\s\S]+nextPath,[\s\S]+currentLegalAcceptance\("email_signup"\)/)
+  assert.match(authCard, /signInWithGoogle\(\{[\s\S]+nextPath,[\s\S]+currentLegalAcceptance\("oauth_callback"\)/)
   assert.match(authProvider, /nextPath\?: string/)
   assert.match(supabaseAuth, /signupRedirect\.searchParams\.set\("next", nextPath\)/)
   assert.match(supabaseAuth, /redirectTo\.searchParams\.set\("next", nextPath\)/)
@@ -66,4 +66,16 @@ test("the disabled Business Evals rollback has a real legacy dashboard instead o
   assert.match(evalsLayout, /redirect\("\/dashboard"\)/)
   assert.match(dashboard, /<ProtectedScreenPage screenKey="overview" \/>/)
   assert.match(dashboard, /if \(businessEvalsEnabled\) redirect\("\/projects"\)/)
+  assert.doesNotMatch(dashboard, /Boolean\(process\.env\.BUSINESS_EVALS_WORKSPACE_ALLOWLIST/)
+  assert.match(dashboard, /LegacyRouteRedirect destination="\/projects"/)
+})
+
+test("enabled workspaces cannot fall back into stale product entry points or the marketing shell", () => {
+  const actionCenter = readFileSync("src/app/action-center/page.tsx", "utf8")
+  const settings = readFileSync("src/app/settings/page.tsx", "utf8")
+  const siteShell = readFileSync("src/components/layout/site-shell.tsx", "utf8")
+
+  assert.match(actionCenter, /LegacyRouteRedirect destination="\/incidents"/)
+  assert.match(settings, /LegacyRouteRedirect destination="\/settings\/workspace"/)
+  assert.match(siteShell, /"\/auth"/)
 })

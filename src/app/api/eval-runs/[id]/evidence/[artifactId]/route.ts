@@ -31,10 +31,13 @@ export async function GET(request: NextRequest, { params }: Context) {
     if (!isEvalEvidencePathForWorkspace(storagePath, auth.workspace.id)) {
       throw new BusinessEvalsApiError(403, "EVIDENCE_ACCESS_DENIED", "The evidence path does not belong to this workspace.")
     }
-    return NextResponse.json({
-      ok: true,
-      data: { url: await createEvalEvidenceSignedUrl(storagePath, 300), expiresInSeconds: 300 },
-    })
+    return NextResponse.json(
+      {
+        ok: true,
+        data: { url: await createEvalEvidenceSignedUrl(storagePath, 300), expiresInSeconds: 300 },
+      },
+      { headers: { "Cache-Control": "private, no-store" } },
+    )
   } catch (error) {
     return businessEvalsErrorResponse(error)
   }

@@ -3,8 +3,19 @@ import "server-only"
 import Browserbase from "@browserbasehq/sdk"
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core"
 
-import { requireBrowserbaseExternalEgressProxy } from "@/lib/runner/browserbase-egress-config"
-import { assertPublicBrowserTarget, installTopLevelNavigationGuard, pageContainsCaptcha, type BrowserNetworkMode } from "@/lib/runner/browser-safety.server"
+import { requireBrowserbaseExternalEgressConfiguration, requireBrowserbaseProjectId } from "@/lib/runner/browserbase-egress-config"
+import { requireBrowserbaseAllowedDomains } from "@/lib/runner/browser-context-policy"
+import { issueBrowserProxyCredentials } from "@/lib/runner/browser-proxy-credentials.server"
+import { requestBrowserbaseSessionReleaseIfStranded } from "@/lib/runner/browserbase-lifecycle.server"
+import {
+  assertBrowserbaseSessionCommerciallyAllowed,
+  markBrowserbaseSessionCreationUncertain,
+  prepareBrowserbaseSessionCreation,
+  recordTerminalBrowserbaseSessionUsage,
+  registerBrowserbaseSessionForMetering,
+  type BrowserbaseSessionMeteringRegistration,
+} from "@/lib/runner/browserbase-usage-control.server"
+import { assertNavigationStayedPublic, assertPublicBrowserTarget, installTopLevelNavigationGuard, pageContainsCaptcha, type BrowserNetworkMode } from "@/lib/runner/browser-safety.server"
 import { selectUnambiguousSubmitActions } from "@/lib/runner/page-scan-actions"
 
 export type DetectedField = {
@@ -38,16 +49,30 @@ export type JourneyPageScan = {
   warnings: string[]
 }
 
-export async function scanJourneyPage(url: string): Promise<JourneyPageScan> {
-  const target = await assertPublicBrowserTarget(url, [new URL(url).hostname.toLowerCase()])
-  const connection = await connectScanBrowser()
+export async function scanJourneyPage(input: {
+  url: string
+  agencyId: string
+  projectId: string
+  allowedHosts: string[]
+}): Promise<JourneyPageScan> {
+  // The project authorization is the source of truth for every top-level
+  // navigation, including an approved cross-host redirect. Reducing this to
+  // the starting hostname would incorrectly block an attested redirect while
+  // still returning the broader list to the builder as if it had been used.
+  const allowedDomains = requireBrowserbaseAllowedDomains(input.allowedHosts)
+  const target = await assertPublicBrowserTarget(input.url, allowedDomains)
+  const connection = await connectScanBrowser(allowedDomains, {
+    agencyId: input.agencyId,
+    projectId: input.projectId,
+  })
   try {
-    await installTopLevelNavigationGuard(connection.page, [target.url.hostname], connection.networkMode)
+    await installTopLevelNavigationGuard(connection.page, allowedDomains, connection.networkMode, { blockSideEffects: true })
     const response = await connection.page.goto(target.url.toString(), {
       waitUntil: "domcontentloaded",
       timeout: 20_000,
     })
     if (!response) throw new Error("The page did not return a navigation response.")
+    await assertNavigationStayedPublic(connection.page, allowedDomains)
 
     const captchaDetected = await pageContainsCaptcha(connection.page)
     const fields = await detectFields(connection.page)
@@ -58,7 +83,7 @@ export async function scanJourneyPage(url: string): Promise<JourneyPageScan> {
     if (!actions.length) warnings.push("No unambiguous form submit control was detected.")
 
     return {
-      url: connection.page.url(),
+      url: (await assertNavigationStayedPublic(connection.page, allowedDomains)).url.toString(),
       title: (await connection.page.title()).slice(0, 200),
       captchaDetected,
       fields,
@@ -70,7 +95,10 @@ export async function scanJourneyPage(url: string): Promise<JourneyPageScan> {
   }
 }
 
-async function connectScanBrowser(): Promise<{
+async function connectScanBrowser(approvedHosts: string[], accounting: {
+  agencyId: string
+  projectId: string
+}): Promise<{
   browser: Browser
   context: BrowserContext
   page: Page
@@ -83,31 +111,77 @@ async function connectScanBrowser(): Promise<{
   }
 
   if (apiKey) {
-    const client = new Browserbase({ apiKey, maxRetries: 1, timeout: 30_000 })
-    const externalEgressProxy = requireBrowserbaseExternalEgressProxy(process.env)
-    const session = await client.sessions.create({
-      ...(process.env.BROWSERBASE_PROJECT_ID?.trim() ? { projectId: process.env.BROWSERBASE_PROJECT_ID.trim() } : {}),
-      timeout: 300,
-      // No domainPattern means catch-all. Never add a direct, `none`, or
-      // Browserbase-managed fallback to this production security boundary.
-      proxies: [externalEgressProxy],
-      region: "eu-central-1",
-      browserSettings: {
-        advancedStealth: false,
-        solveCaptchas: false,
-        recordSession: false,
-        logSession: false,
-        ignoreCertificateErrors: false,
-      },
-    }).catch(() => {
-      throw new Error("Browserbase rejected the policy-constrained scan session configuration.")
+    // Session creation is non-idempotent. Do not let the SDK replay an
+    // ambiguous provider mutation; the 300-second provider timeout bounds any
+    // session whose response is lost before we receive its identifier.
+    const client = new Browserbase({ apiKey, maxRetries: 0, timeout: 30_000 })
+    const projectId = requireBrowserbaseProjectId(process.env)
+    const allowedDomains = requireBrowserbaseAllowedDomains(approvedHosts)
+    // Page scans are read-only. The canonical target hostname is a stable,
+    // non-secret subject; the empty side-effect scope makes all mutation-class
+    // requests fail at the gateway even if page behavior is hostile.
+    const proxyCredentials = issueBrowserProxyCredentials({
+      subject: `scan:${allowedDomains[0]}`,
+      sideEffectHosts: [],
     })
-    const browser = await chromium.connectOverCDP(session.connectUrl).catch(() => {
+    const externalEgress = requireBrowserbaseExternalEgressConfiguration(proxyCredentials, process.env)
+    await assertBrowserbaseSessionCommerciallyAllowed({ client, projectId })
+    const purpose = { kind: "page_scan" as const, ...accounting }
+    const creationIntent = await prepareBrowserbaseSessionCreation({
+      browserbaseProjectId: projectId,
+      purpose,
+    })
+    let session
+    try {
+      session = await client.sessions.create({
+        projectId,
+        keepAlive: false,
+        timeout: 300,
+        // Opaque correlation supports recovery from a lost create response;
+        // it intentionally contains no workspace, Project, URL, or user data.
+        userMetadata: { mf_intent: creationIntent.correlationToken },
+        // No domainPattern means catch-all. Never add a direct, `none`, or
+        // Browserbase-managed fallback to this production security boundary.
+        proxies: externalEgress.proxies,
+        proxySettings: externalEgress.proxySettings,
+        region: "eu-central-1",
+        browserSettings: {
+          // This is a provider-side top-level navigation guard only. The
+          // catch-all external proxy remains mandatory for every subresource,
+          // frame, worker, WebSocket, redirect, and DNS resolution.
+          allowedDomains,
+          advancedStealth: false,
+          solveCaptchas: false,
+          recordSession: false,
+          logSession: false,
+          ignoreCertificateErrors: false,
+        },
+      })
+    } catch {
+      await markBrowserbaseSessionCreationUncertain({
+        browserbaseProjectId: projectId,
+        creationIntentId: creationIntent.id,
+        reason: "create_response_ambiguous",
+      }).catch(() => undefined)
+      throw new Error("Browserbase rejected or ambiguously answered the policy-constrained scan session configuration.")
+    }
+    const meteringRegistration = await registerBrowserbaseSessionForMetering({
+      client,
+      browserbaseProjectId: projectId,
+      providerSessionId: session.id,
+      creationIntent,
+    })
+    const browser = await chromium.connectOverCDP(session.connectUrl).catch(async () => {
+      await releaseAndMeterScanSession(client, meteringRegistration)
       throw new Error("The Browserbase scan session connection failed securely.")
     })
     const context = browser.contexts()[0]
     const page = context?.pages()[0]
-    if (!context || !page) throw new Error("Browserbase did not expose its default recorded context.")
+    if (!context || !page) {
+      await browser.close().catch(() => undefined)
+      await releaseAndMeterScanSession(client, meteringRegistration)
+      throw new Error("Browserbase did not expose its default recorded context.")
+    }
     return {
       browser,
       context,
@@ -115,6 +189,7 @@ async function connectScanBrowser(): Promise<{
       networkMode: "external_proxy",
       close: async () => {
         await browser.close().catch(() => undefined)
+        await releaseAndMeterScanSession(client, meteringRegistration)
       },
     }
   }
@@ -124,6 +199,30 @@ async function connectScanBrowser(): Promise<{
   const context = await browser.newContext({ serviceWorkers: "block", ignoreHTTPSErrors: false })
   const page = await context.newPage()
   return { browser, context, page, networkMode: "pinned_worker", close: () => browser.close() }
+}
+
+async function releaseAndMeterScanSession(
+  client: Browserbase,
+  registration: BrowserbaseSessionMeteringRegistration
+) {
+  let releaseError: unknown
+  try {
+    await requestBrowserbaseSessionReleaseIfStranded(
+      client,
+      registration.providerSessionId,
+      registration.browserbaseProjectId
+    )
+  } catch (error) {
+    releaseError = error
+  }
+  let meteringError: unknown
+  try {
+    await recordTerminalBrowserbaseSessionUsage({ client, registration })
+  } catch (error) {
+    meteringError = error
+  }
+  if (releaseError) throw releaseError
+  if (meteringError) throw meteringError
 }
 
 async function detectFields(page: Page): Promise<DetectedField[]> {

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "termsVersion": "2026-07-19",
+  "privacyVersion": "2026-07-19",
+  "releaseCommit": "0000000000000000000000000000000000000000",
+  "operatorFactsConfirmed": false,
+  "professionalReview": {
+    "completed": false,
+    "scope": "terms_privacy_checkout",
+    "reviewer": "",
+    "reviewedAt": ""
+  },
+  "approvedForPublicCheckout": false,
+  "approvedForDomainCutover": false
+}

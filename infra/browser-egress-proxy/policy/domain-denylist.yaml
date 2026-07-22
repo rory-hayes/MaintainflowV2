@@ -1,0 +1,10 @@
+version: 1
+domains:
+  - metadata.google.internal
+  - metadata.google
+  - instance-data.ec2.internal
+  - metadata.azure.internal
+  - host.docker.internal
+  - gateway.docker.internal
+  - kubernetes.default.svc
+  - fly-local-6pn.internal

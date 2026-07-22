@@ -7,6 +7,7 @@ import {
   type BusinessEvalReportPdfModel,
 } from "@/lib/reports/business-evals-report-pdf.server"
 import { getSupabaseServerConfig, supabaseServiceJson } from "@/lib/supabase/server"
+import { supabaseServiceAuthHeaders } from "@/lib/supabase/api-key-roles"
 import {
   createReportPdfStoragePath,
   encodeStorageObjectPath,
@@ -22,17 +23,22 @@ export async function prepareBusinessEvalReportPdf(agencyId: string, reportId: s
     throw new BusinessEvalsApiError(402, "PDF_REPORTING_REQUIRED", "PDF reports are available on Solo, Team and Agency plans.")
   }
   const report = await loadBusinessEvalReport(agencyId, reportId)
-  const model = await createPdfModel(agencyId, report, entitlement.features.whiteLabel)
+  const whiteLabel = entitlement.features.whiteLabel
+  const model = await createPdfModel(agencyId, report, whiteLabel)
   const pdfBuffer = await renderBusinessEvalReportPdf(model)
-  const path = createReportPdfStoragePath(agencyId, reportId, Number(report.snapshot_version))
+  const path = createReportPdfStoragePath(
+    agencyId,
+    reportId,
+    Number(report.snapshot_version),
+    whiteLabel ? "white_label" : "maintain_flow",
+  )
   const config = getSupabaseServerConfig()
   const storageResponse = await fetch(
     `${config.supabaseUrl}/storage/v1/object/${REPORT_PDF_BUCKET}/${encodeStorageObjectPath(path)}`,
     {
       method: "POST",
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
         "Content-Type": "application/pdf",
         "Cache-Control": "private, max-age=0, must-revalidate",
         "x-upsert": "true",
@@ -82,13 +88,23 @@ export async function loadBusinessEvalReportPdf(agencyId: string, reportId: stri
   if (!path || Number(report.pdf_snapshot_version) !== snapshotVersion) {
     throw new BusinessEvalsApiError(404, "PDF_NOT_READY", "Prepare the current report PDF before downloading it.")
   }
-  if (!isExpectedReportPdfStoragePath(path, agencyId, reportId, snapshotVersion)) {
-    throw new BusinessEvalsApiError(409, "PDF_PATH_MISMATCH", "The stored PDF does not match this report snapshot.")
+  if (!isExpectedReportPdfStoragePath(
+    path,
+    agencyId,
+    reportId,
+    snapshotVersion,
+    entitlement.features.whiteLabel ? "white_label" : "maintain_flow",
+  )) {
+    throw new BusinessEvalsApiError(
+      409,
+      "PDF_BRANDING_CHANGED",
+      "The stored PDF does not match the workspace's current reporting brand. Prepare the report again before downloading it.",
+    )
   }
   const config = getSupabaseServerConfig()
   const response = await fetch(
     `${config.supabaseUrl}/storage/v1/object/${REPORT_PDF_BUCKET}/${encodeStorageObjectPath(path)}`,
-    { headers: { apikey: config.serviceRoleKey, Authorization: `Bearer ${config.serviceRoleKey}` } }
+    { headers: supabaseServiceAuthHeaders(config.serviceRoleKey) }
   )
   if (!response.ok || !response.body) {
     throw new BusinessEvalsApiError(response.status || 404, "PDF_NOT_FOUND", "The private report PDF could not be loaded.")

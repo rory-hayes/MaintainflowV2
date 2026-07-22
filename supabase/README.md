@@ -32,6 +32,8 @@ For existing projects created before the Free plan existed, run the Free-plan mi
 -- then paste the full contents of supabase/maintainflow_atomic_check_evidence_migration.sql
 -- then paste the full contents of supabase/maintainflow_scheduler_capacity_migration.sql
 -- then paste the full contents of supabase/maintainflow_business_evals_migration.sql
+-- then paste the full contents of supabase/maintainflow_legal_acceptances_migration.sql
+-- then paste the full contents of supabase/maintainflow_browser_context_leases_migration.sql
 
 -- only after the compatible application artifact is live:
 -- paste the full contents of supabase/maintainflow_assurance_integrity_migration.sql
@@ -58,8 +60,9 @@ The SQL creates:
 - service-role-only `rate_limit_events` for endpoint-test limiter reporting
 - service-role-only `public_acquisition_events` for identifier-free page-view and signup-CTA counts, with 90-day raw-event retention
 - additive Business Evals tables and service-only RPCs for owner-authorized Projects, immutable Journey versions, staged eval evidence, schedules, incidents, reports, alerts, and expiring share links; legacy Clients and Workflows remain the physical compatibility records
+- exact-version legal acceptance evidence: explicit email signup metadata is captured synchronously by an `auth.users` trigger, Google OAuth acceptance is recorded by a service-only idempotent RPC after authentication, direct email signup without current acceptance is rejected, and new workspace membership is blocked until a current row exists; existing users are not backfilled
 
-The production `postbuild` command detects whether the live enum predates Free and always applies the entitlement, self-serve workspace, assurance expansion, check-evidence privacy, atomic check-evidence, scheduler-capacity expansion, and Business Evals migrations when `VERCEL_ENV=production` and `DATABASE_URL` is configured. It verifies the Business Evals relations, critical RPC signatures, service-only evidence boundary, and removal of direct authenticated team writes before committing. The privacy migration is backward-compatible: it removes legacy response-derived assertion details and normalized result blobs, then enforces structural pass/fail-only evidence on every check-run write. The atomic expansion adds the service-only persistence RPC, provenance marker, and scheduler compare-and-swap timestamps. It preserves the old artifact's legacy write path, but RLS and column grants prevent browser credentials from stamping/promoting `service` or changing a service row. Legacy rows remain stored but are excluded from customer health, issue verification, activation, reports, and PDFs; any existing snapshot/PDF binding that cites them is marked stale. `MAINTAINFLOW_MIGRATION_PHASE` defaults to `expand`. After the compatible artifact is proven live, set `MAINTAINFLOW_MIGRATION_PHASE=contract` for a second deployment; only contract phase reapplies the legacy-report invalidation, rebuilds derived workflow/check health from service rows, applies and verifies full assurance integrity, changes check-run and job-run access to authenticated select-only, and retires the paid-pilot runtime. Both phases are serialized with a database advisory lock, use bounded timeouts, and run inside one transaction so any failure rolls back before the build exits. Before each phase, set `MIGRATION_DRY_RUN=true` with the intended phase and `DATABASE_URL`; the script executes that phase and verification path, then explicitly rolls back. A code build is not authorization to mutate production data or permissions.
+The production `postbuild` command detects whether the live enum predates Free and always applies the entitlement, self-serve workspace, assurance expansion, check-evidence privacy, atomic check-evidence, scheduler-capacity expansion, Business Evals, legal-acceptance, and browser-context migrations when `VERCEL_ENV=production` and `DATABASE_URL` is configured. It verifies the Business Evals relations, critical RPC signatures, service-only evidence boundary, legal-acceptance trigger/privilege boundary, and removal of direct authenticated team writes before committing. The privacy migration is backward-compatible: it removes legacy response-derived assertion details and normalized result blobs, then enforces structural pass/fail-only evidence on every check-run write. The atomic expansion adds the service-only persistence RPC, provenance marker, and scheduler compare-and-swap timestamps. It preserves the old artifact's legacy write path, but RLS and column grants prevent browser credentials from stamping/promoting `service` or changing a service row. Legacy rows remain stored but are excluded from customer health, issue verification, activation, reports, and PDFs; any existing snapshot/PDF binding that cites them is marked stale. `MAINTAINFLOW_MIGRATION_PHASE` defaults to `expand`. After the compatible artifact is proven live, set `MAINTAINFLOW_MIGRATION_PHASE=contract` for a second deployment; only contract phase reapplies the legacy-report invalidation, rebuilds derived workflow/check health from service rows, applies and verifies full assurance integrity, changes check-run and job-run access to authenticated select-only, and retires the paid-pilot runtime. Both phases are serialized with a database advisory lock, use bounded timeouts, and run inside one transaction so any failure rolls back before the build exits. Before each phase, set `MIGRATION_DRY_RUN=true` with the intended phase and `DATABASE_URL`; the script executes that phase and verification path, then explicitly rolls back. A code build is not authorization to mutate production data or permissions.
 
 ## 2. Configure app environment variables
 
@@ -67,10 +70,11 @@ Do not commit real secrets. Use these names in `.env.local` and deployment env s
 
 ```txt
 NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_PROJECT_REF=<project-ref>
 # Optional after Supabase custom domain activation:
 # NEXT_PUBLIC_SUPABASE_AUTH_URL=https://auth.maintainflow.io
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<publishable key>
-SUPABASE_SERVICE_ROLE_KEY=<server-only secret key>
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<sb_publishable_ browser-safe key>
+SUPABASE_SERVICE_ROLE_KEY=<sb_secret_ server-only key>
 DATABASE_URL=postgresql://postgres:<database-password>@db.<project-ref>.supabase.co:5432/postgres
 MAINTAINFLOW_OPS_ROUTE_KEY=<private route key for /control-room/[key]>
 OPS_ADMIN_EMAILS=<comma-separated allowlist>
@@ -93,11 +97,13 @@ select to_regclass('public.agencies') as agencies_table;
 select to_regclass('public.workflows') as workflows_table;
 select to_regclass('public.reports') as reports_table;
 select to_regclass('public.public_acquisition_events') as acquisition_events_table;
+select to_regclass('public.legal_acceptances') as legal_acceptances_table;
 select id, public from storage.buckets where id = 'maintainflow-reports';
 ```
 
 - Supabase Auth has **Allow new users to sign up** enabled.
-- A fresh email/password or Google user can authenticate, call `create_agency_workspace(...)` once, and receive an owner membership in a Free workspace.
+- `auth_users_capture_maintainflow_legal_acceptance` exists on `auth.users`, `memberships_require_current_legal_acceptance` exists on `public.memberships`, and neither `anon` nor `authenticated` has access to `public.legal_acceptances`.
+- A fresh email/password or Google user with durable current acceptance can call `create_agency_workspace(...)` once and receive an owner membership in a Free workspace. A trusted Supabase team invite may reserve its requested membership before activation, but no acceptance row is created until the recipient explicitly accepts in the password-activation screen.
 - A second workspace-creation attempt for the same user is rejected, and authenticated users cannot update billing-entitlement columns directly.
 
 ## 4. App connection
@@ -106,12 +112,15 @@ The app uses the public Supabase URL and publishable key for Auth, PostgREST, an
 private report PDF Storage access:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_PROJECT_REF` (must exactly match the project URL)
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
 Report exports are uploaded to the private `maintainflow-reports` bucket and
 persist `reports.pdf_storage_path`. Downloads go through
 `/api/reports/[id]/download`, which requires the signed-in user's bearer token.
-Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. Scheduled checks and immutable
+Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. New `sb_secret_` keys are sent in
+the Supabase `apikey` header only; the legacy bearer form is retained solely for
+backward-compatible local migrations and is rejected by production release checks. Scheduled checks and immutable
 report PDF creation and download use it only after authorizing the requesting
 user and validating current evidence; never expose it to browser code.
 Authenticated browser users have no direct select, insert, update, or delete
@@ -154,9 +163,11 @@ App callback route:
 ```txt
 http://localhost:3000/auth/callback
 https://www.maintainflow.io/auth/callback
+https://www.maintainflow.io/auth/confirm
+https://www.maintainflow.io/reset-password
 ```
 
-The app starts OAuth through Supabase and stores the returned Supabase session in the existing auth provider.
+The app starts Google OAuth through Supabase and installs a session only after exchanging a code with the OAuth-specific browser-held PKCE verifier. Email confirmation and password recovery do not use browser-held PKCE state: their custom hosted templates deliver one-time `TokenHash` values in fragments on exact allowlisted redirects, which the app captures, scrubs, and verifies through a same-origin server action. No temporary confirmation/recovery session is returned to or stored by the browser, and each is globally revoked. Confirmation requires exact durable signup acceptance and then normal sign-in; recovery requires explicit exact-current acceptance before the password changes. Generic access/refresh-token fragments remain rejected. The typed invitation flow retains its existing captured-and-scrubbed credentials, explicit password/legal action, global revocation, and normal sign-in requirement. Email click tracking must remain disabled for both token-hash templates.
 
 ## 5. Configure branded auth emails
 
@@ -174,10 +185,14 @@ At minimum, verify the hosted Supabase settings use:
 Site URL: https://www.maintainflow.io
 Redirect URLs:
   https://www.maintainflow.io/auth/callback
+  https://www.maintainflow.io/auth/confirm
   https://www.maintainflow.io/reset-password
+  https://maintainflow-v2.vercel.app/auth/callback
+  https://maintainflow-v2.vercel.app/auth/confirm
+  https://maintainflow-v2.vercel.app/reset-password
 ```
 
-The app also includes a root-page auth callback handler for legacy or misconfigured confirmation links that land on `/#access_token=...`, but the correct production callback URLs should still be set in Supabase.
+Approved token-hash fragments exist only on `/auth/confirm` and `/reset-password`. Never add a root hash callback, wildcard redirect, or access/refresh-token callback. The root handler ignores access/refresh fragments, and `/auth/callback` rejects them before network or storage access.
 
 ## 6. Retire pilot lead capture
 
@@ -197,7 +212,7 @@ This adds:
 
 - lease columns on `public.checks`
 - `public.claim_due_checks(...)` for atomic due-check claiming with `for update skip locked`, including the check and workflow timestamps required by evidence compare-and-swap
-- optional `pg_cron` + `pg_net` setup for calling the legacy-check, business-eval, and alert-delivery cron routes
+- optional `pg_cron` + `pg_net` setup for calling the legacy-check, business-eval, Browser Context cleanup, and alert-delivery cron routes
 
 Set these app environment variables locally and in production:
 
@@ -205,6 +220,8 @@ Set these app environment variables locally and in production:
 CRON_SECRET=<long random secret>
 CHECK_RUNNER_BATCH_SIZE=5
 CHECK_RUNNER_LEASE_SECONDS=180
+# Defaults to 4 and is clamped to 1-4 contexts per cron pass.
+BROWSER_CONTEXT_CLEANUP_BATCH_SIZE=4
 ALERT_DELIVERY_BATCH_SIZE=10
 ALERT_ENDPOINT_ENCRYPTION_KEY=<at-least-32-random-characters>
 RESEND_API_KEY=<Resend API key>
@@ -242,6 +259,7 @@ where jobname in (
   'maintainflow-run-checks',
   'maintainflow-run-checks-2',
   'maintainflow-run-evals',
+  'maintainflow-cleanup-browser-contexts',
   'maintainflow-deliver-eval-alerts'
 );
 ```
@@ -252,11 +270,11 @@ You can also run the read-only verification helper:
 -- paste the full contents of supabase/maintainflow_scheduler_verify.sql
 ```
 
-The final schedule uses two legacy-check dispatchers, one business-eval dispatcher, and one alert-delivery worker every minute. Alert delivery claims at most ten due rows, retries transient failures with exponential backoff, and permanently stops after eight attempts. `ALERT_ENDPOINT_ENCRYPTION_KEY` encrypts destinations and signing secrets at rest; keep it stable and secret. Webhook signing secrets are shown only when created or rotated.
+The final schedule uses two legacy-check dispatchers, one business-eval dispatcher, one dedicated Browser Context cleanup worker, and one alert-delivery worker every minute. The cleanup worker requests at most four contexts and uses a 60-second transport timeout; the application gives each Browserbase call five seconds with no SDK retry, then records an idempotent database retry for a later pass. Alert delivery claims at most ten due rows, retries transient failures with exponential backoff, and permanently stops after eight attempts. `ALERT_ENDPOINT_ENCRYPTION_KEY` encrypts destinations and signing secrets at rest; keep it stable and secret. Webhook signing secrets are shown only when created or rotated.
 
 Each legacy-check invocation claims at most five checks and runs that one wave concurrently, so launch capacity is 10 check starts per minute or 600 per hour. That is twice the 300-workflow Scale plan's minimum hourly cadence. Claims select at most one due check per workflow per worker, avoiding workflow compare-and-swap collisions. New workflows only need a default `checks.next_run_at`; the global workers pick them up automatically.
 
-Existing installations are upgraded in two phases. `maintainflow_scheduler_capacity_migration.sql` preserves the installed Vault-backed or direct command, sets the `pg_net` timeout to 60 seconds, installs both minute workers, and explicitly sends one check per request so the previously live sequential artifact remains safe during expansion. After the concurrent artifact is proven live, contract phase applies `maintainflow_scheduler_capacity_contract_migration.sql` and raises both requests to five checks. The production migration runner verifies one-check commands in expansion and five-check commands in contract.
+Existing installations are upgraded in two phases. `maintainflow_scheduler_capacity_migration.sql` preserves the installed Vault-backed or direct command, sets the `pg_net` timeout to 60 seconds, installs both minute workers, and explicitly sends one check per request so the previously live sequential artifact remains safe during expansion. `maintainflow_browser_context_cleanup_scheduler_migration.sql` derives a separate bounded cleanup job from the installed eval command without changing the legacy eval job. After the concurrent artifact is proven live, contract phase applies `maintainflow_scheduler_capacity_contract_migration.sql` and raises both check requests to five. The production migration runner verifies one-check commands in expansion, five-check commands in contract, and the four-context cleanup command in both phases.
 
 ## 8. Smoke test the cron route
 

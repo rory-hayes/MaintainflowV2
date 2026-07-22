@@ -1,5 +1,7 @@
 import { encodeStorageObjectPath, isExpectedReportPdfStoragePath, REPORT_PDF_BUCKET } from "./report-storage-path.ts"
 import { loadAuthorizedReportBundle, reportBundleSnapshotIsCurrent } from "./report-bundle.server.ts"
+import { isSupabasePublicApiKey, isSupabaseServiceApiKey, supabaseServiceAuthHeaders } from "./api-key-roles.ts"
+import { isApprovedSupabaseOriginSet } from "./origin-policy.ts"
 
 type ReportRow = {
   id: string
@@ -18,6 +20,8 @@ type ReportRow = {
 export type ReportDownloadConfig = ReturnType<typeof getReportDownloadConfig>
 type ReportDownloadEnv = {
   NEXT_PUBLIC_SUPABASE_URL?: string
+  NEXT_PUBLIC_SUPABASE_AUTH_URL?: string
+  NEXT_PUBLIC_SUPABASE_PROJECT_REF?: string
   NEXT_PUBLIC_SUPABASE_ANON_KEY?: string
   SUPABASE_SERVICE_ROLE_KEY?: string
 }
@@ -34,8 +38,20 @@ export function getReportDownloadConfig(env?: ReportDownloadEnv) {
   const supabaseUrl = source.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "") ?? ""
   const anonKey = source.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ""
   const serviceRoleKey = source.SUPABASE_SERVICE_ROLE_KEY ?? ""
+  const authUrl = source.NEXT_PUBLIC_SUPABASE_AUTH_URL?.replace(/\/+$/, "") || supabaseUrl
   return {
-    enabled: Boolean(supabaseUrl && anonKey && serviceRoleKey),
+    enabled: Boolean(
+      supabaseUrl
+      && isApprovedSupabaseOriginSet({
+        supabaseUrl,
+        authUrl,
+        expectedProjectRef: source.NEXT_PUBLIC_SUPABASE_PROJECT_REF,
+        nodeEnv: process.env.NODE_ENV,
+      })
+      && isSupabasePublicApiKey(anonKey)
+      && isSupabaseServiceApiKey(serviceRoleKey)
+      && anonKey.trim() !== serviceRoleKey.trim()
+    ),
     supabaseUrl,
     anonKey,
     serviceRoleKey,
@@ -114,8 +130,7 @@ export async function loadAuthorizedReportPdf(
     `${config.supabaseUrl}/storage/v1/object/${REPORT_PDF_BUCKET}/${encodeStorageObjectPath(report.pdfStoragePath)}`,
     {
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       },
     }
   )

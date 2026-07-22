@@ -1,0 +1,28 @@
+# Deployment template only. This app must remain private: do not add a
+# services/http_service section and do not allocate a public or Flycast IP.
+app = "replace-with-reviewed-dialer-app"
+primary_region = "fra"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "infra/browser-egress-proxy/deploy/images/Dockerfile.dialer"
+
+[env]
+  MF_DIALER_HEALTH_ADDR = "127.0.0.1:8081"
+  MF_DIALER_ALLOWED_CLIENT_SPIFFE_ID = "spiffe://maintainflow/interceptor"
+  MF_DIALER_DOMAIN_DENYLIST_FILE = "/opt/maintainflow/policy/domain-denylist.yaml"
+
+# Intentionally no [[services]], [http_service], [checks], [metrics], mounts,
+# or public ports. The dialer binds directly to FLY_PRIVATE_IP:9443 and its
+# health endpoint remains loopback-only.
+
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
+  persist_rootfs = "never"

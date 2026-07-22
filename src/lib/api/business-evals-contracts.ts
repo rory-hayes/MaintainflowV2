@@ -1,5 +1,23 @@
 import { z } from "zod"
 
+const MAX_BUSINESS_EVALS_JSON_BYTES = 256 * 1024
+
+export class BusinessEvalsRequestJsonError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = "BusinessEvalsRequestJsonError"
+    this.status = status
+    this.code = code
+  }
+}
+
 export const uuidSchema = z.string().uuid()
 export const idempotencyKeySchema = z.string().trim().min(8).max(200)
 const publicHostnamePattern = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/
@@ -391,7 +409,6 @@ export const journeyDraftSchema = z.object({
 
 export const journeyPublishSchema = z.object({
   expectedDraftRevision: z.number().int().min(0),
-  supervisedRunId: uuidSchema.optional(),
 })
 
 export const journeyScheduleSchema = z.object({
@@ -545,7 +562,23 @@ export type AiJourneyDraftRequest = z.infer<typeof aiJourneyDraftRequestSchema>
 export type AiRunDiagnosisRequest = z.infer<typeof aiRunDiagnosisRequestSchema>
 
 export async function parseRequestJson<TSchema extends z.ZodType>(request: Request, schema: TSchema) {
-  const payload = await request.json().catch(() => null)
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    throw new BusinessEvalsRequestJsonError(415, "UNSUPPORTED_CONTENT_TYPE", "Send this request as JSON.")
+  }
+  const declaredLength = Number(request.headers.get("content-length") ?? "0")
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BUSINESS_EVALS_JSON_BYTES) {
+    throw new BusinessEvalsRequestJsonError(413, "REQUEST_TOO_LARGE", "The request body is too large.")
+  }
+  const rawBody = await request.text().catch(() => "")
+  if (new TextEncoder().encode(rawBody).byteLength > MAX_BUSINESS_EVALS_JSON_BYTES) {
+    throw new BusinessEvalsRequestJsonError(413, "REQUEST_TOO_LARGE", "The request body is too large.")
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(rawBody)
+  } catch {
+    throw new BusinessEvalsRequestJsonError(400, "INVALID_JSON", "The request body is not valid JSON.")
+  }
   return schema.parse(payload) as z.infer<TSchema>
 }
 

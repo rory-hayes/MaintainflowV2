@@ -4,11 +4,16 @@ import { NextRequest, NextResponse } from "next/server"
 import { Resend } from "resend"
 import { z } from "zod"
 
+import { createFixedWindowRateLimiter } from "@/lib/core/rate-limit"
 import { controlledFixtureScenario, isControlledFixtureEnabled } from "@/lib/evals/controlled-fixtures"
 import { createControlledFixtureToken } from "@/lib/evals/controlled-fixture-token.server"
+import { supabaseServiceJson } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
+
+const fixtureSourceLimiter = createFixedWindowRateLimiter({ limit: 20, windowMs: 5 * 60_000 })
+const fixtureProcessLimiter = createFixedWindowRateLimiter({ limit: 120, windowMs: 5 * 60_000 })
 
 const fixtureSubmissionSchema = z.object({
   scenario: z.string().transform((value, context) => {
@@ -28,6 +33,14 @@ const fixtureSubmissionSchema = z.object({
 
 export async function POST(request: NextRequest) {
   if (!isControlledFixtureEnabled()) return NextResponse.json({ ok: false, error: { code: "NOT_FOUND", message: "Not found." } }, { status: 404 })
+  const sourceKey = requestSourceKey(request)
+  if (!fixtureProcessLimiter.check("all-fixture-submissions").allowed || !fixtureSourceLimiter.check(sourceKey).allowed) {
+    return errorResponse(429, "FIXTURE_RATE_LIMITED", "Too many controlled fixture submissions. Wait before trying again.")
+  }
+  const declaredLength = Number(request.headers.get("content-length") ?? "0")
+  if (Number.isFinite(declaredLength) && declaredLength > 16_384) {
+    return errorResponse(413, "FIXTURE_TOO_LARGE", "The controlled fixture payload is too large.")
+  }
   const raw = await request.text()
   if (Buffer.byteLength(raw, "utf8") > 16_384) return errorResponse(413, "FIXTURE_TOO_LARGE", "The controlled fixture payload is too large.")
   let input: z.infer<typeof fixtureSubmissionSchema>
@@ -41,6 +54,9 @@ export async function POST(request: NextRequest) {
   const inboundDomain = process.env.EVAL_INBOUND_DOMAIN?.trim().toLowerCase() ?? ""
   if (!inboundDomain || recipientDomain(input.email) !== inboundDomain) {
     return errorResponse(403, "FIXTURE_RECIPIENT_DENIED", "Controlled fixture email can be sent only to the configured Maintain Flow inbound domain.")
+  }
+  if (process.env.NODE_ENV === "production" && !await persistentFixtureRateLimitAllows(sourceKey, input.email)) {
+    return errorResponse(429, "FIXTURE_RATE_LIMITED", "Too many controlled fixture submissions. Wait before trying again.")
   }
   if (input.scenario === "captcha-blocked") return errorResponse(409, "CAPTCHA_BLOCKED", "The controlled CAPTCHA blocks this submission.")
   if (input.scenario === "failed-lead") return errorResponse(422, "BUSINESS_ASSERTION_FAILED", "Fixture lead submission failed")
@@ -98,6 +114,38 @@ function recipientDomain(value: string) {
   return value.trim().toLowerCase().split("@").at(-1) ?? ""
 }
 
+type RateLimitRow = { allowed?: boolean }
+
+async function persistentFixtureRateLimitAllows(sourceKey: string, recipient: string) {
+  try {
+    const checks = await Promise.all([
+      consumePersistentFixtureLimit("user", `source:${sourceKey}`, 20),
+      consumePersistentFixtureLimit("destination_domain", `recipient:${recipient.trim().toLowerCase()}`, 5),
+    ])
+    return checks.every(Boolean)
+  } catch {
+    return false
+  }
+}
+
+async function consumePersistentFixtureLimit(scope: "user" | "destination_domain", key: string, limit: number) {
+  const rows = await supabaseServiceJson<RateLimitRow[]>("rpc/consume_business_eval_rate_limit", {
+    method: "POST",
+    body: JSON.stringify({
+      p_scope_type: scope,
+      p_scope_key_hash: createHash("sha256").update(`controlled-fixture:${scope}:${key}`).digest("hex"),
+      p_limit: limit,
+      p_window_seconds: 300,
+    }),
+  })
+  return rows[0]?.allowed === true
+}
+
+function requestSourceKey(request: NextRequest) {
+  const candidate = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? ""
+  return /^[A-Fa-f0-9:.]{3,64}$/.test(candidate) ? candidate : "unknown-source"
+}
+
 function fixtureOrigin(request: NextRequest) {
   const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim() || process.env.NEXT_PUBLIC_APP_URL?.trim()
   const origin = configured ? new URL(configured).origin : request.nextUrl.origin
@@ -110,5 +158,8 @@ function escapeHtml(value: string) {
 }
 
 function errorResponse(status: number, code: string, message: string) {
-  return NextResponse.json({ ok: false, error: { code, message } }, { status })
+  return NextResponse.json(
+    { ok: false, error: { code, message } },
+    { status, headers: { "Cache-Control": "private, no-store, max-age=0", "X-Content-Type-Options": "nosniff" } },
+  )
 }

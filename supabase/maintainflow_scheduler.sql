@@ -215,6 +215,13 @@ begin
       null;
   end;
 
+  begin
+    perform cron.unschedule('maintainflow-cleanup-browser-contexts');
+  exception
+    when others then
+      null;
+  end;
+
   perform cron.schedule(
     'maintainflow-run-checks',
     coalesce(nullif(trim(schedule), ''), '* * * * *'),
@@ -276,6 +283,26 @@ begin
   );
 
   perform cron.schedule(
+    'maintainflow-cleanup-browser-contexts',
+    coalesce(nullif(trim(schedule), ''), '* * * * *'),
+    $cron$
+      select net.http_post(
+        url := (select decrypted_secret from vault.decrypted_secrets where name = 'maintainflow_app_url') || '/api/cron/cleanup-browser-contexts',
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'maintainflow_cron_secret')
+        ),
+        body := jsonb_build_object(
+          'source', 'supabase_pg_cron',
+          'scheduled_at', now(),
+          'batchSize', 4
+        ),
+        timeout_milliseconds := 60000
+      );
+    $cron$
+  );
+
+  perform cron.schedule(
     'maintainflow-deliver-eval-alerts',
     coalesce(nullif(trim(schedule), ''), '* * * * *'),
     $cron$
@@ -317,6 +344,7 @@ declare
   normalized_app_url text;
   cron_sql text;
   eval_cron_sql text;
+  context_cleanup_cron_sql text;
   alert_cron_sql text;
 begin
   if app_url is null or trim(app_url) = '' then
@@ -352,6 +380,13 @@ begin
 
   begin
     perform cron.unschedule('maintainflow-deliver-eval-alerts');
+  exception
+    when others then
+      null;
+  end;
+
+  begin
+    perform cron.unschedule('maintainflow-cleanup-browser-contexts');
   exception
     when others then
       null;
@@ -415,6 +450,32 @@ begin
     eval_cron_sql
   );
 
+  context_cleanup_cron_sql := format(
+    $command$
+      select net.http_post(
+        url := %L,
+        headers := jsonb_build_object(
+          'Content-Type', 'application/json',
+          'Authorization', %L
+        ),
+        body := jsonb_build_object(
+          'source', 'supabase_pg_cron',
+          'scheduled_at', now(),
+          'batchSize', 4
+        ),
+        timeout_milliseconds := 60000
+      );
+    $command$,
+    normalized_app_url || '/api/cron/cleanup-browser-contexts',
+    'Bearer ' || cron_secret
+  );
+
+  perform cron.schedule(
+    'maintainflow-cleanup-browser-contexts',
+    coalesce(nullif(trim(schedule), ''), '* * * * *'),
+    context_cleanup_cron_sql
+  );
+
   alert_cron_sql := format(
     $command$
       select net.http_post(
@@ -470,4 +531,4 @@ commit;
 -- Confirm the job exists:
 -- select jobid, jobname, schedule, command
 -- from cron.job
--- where jobname in ('maintainflow-run-checks', 'maintainflow-run-checks-2', 'maintainflow-run-evals', 'maintainflow-deliver-eval-alerts');
+-- where jobname in ('maintainflow-run-checks', 'maintainflow-run-checks-2', 'maintainflow-run-evals', 'maintainflow-cleanup-browser-contexts', 'maintainflow-deliver-eval-alerts');

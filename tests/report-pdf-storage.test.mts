@@ -13,7 +13,7 @@ import {
 test("PDF preparation requires the server-only storage credential", () => {
   assert.equal(getReportPdfStorageConfig({
     NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "sb_publishable_test_public_key_1234567890",
   }).enabled, false)
 })
 
@@ -40,8 +40,8 @@ test("server-side PDF preparation binds a versioned private object to the exact 
       const body = init?.body
       assert.ok(Buffer.isBuffer(body))
       assert.equal(body.subarray(0, 5).toString("latin1"), "%PDF-")
-      assert.equal(headersToRecord(init?.headers).authorization, "Bearer service-role")
-      assert.equal(headersToRecord(init?.headers).apikey, "service-role")
+      assert.equal(headersToRecord(init?.headers).authorization, undefined)
+      assert.equal(headersToRecord(init?.headers).apikey, "sb_secret_test_server_key_1234567890")
       assert.equal(headersToRecord(init?.headers)["x-upsert"], "false")
       return new Response(null, { status: 200 })
     }
@@ -153,8 +153,8 @@ test("direct database writes cannot prepare partial or historical report periods
 function config() {
   return getReportPdfStorageConfig({
     NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
-    SUPABASE_SERVICE_ROLE_KEY: "service-role",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "sb_publishable_test_public_key_1234567890",
+    SUPABASE_SERVICE_ROLE_KEY: "sb_secret_test_server_key_1234567890",
   })
 }
 

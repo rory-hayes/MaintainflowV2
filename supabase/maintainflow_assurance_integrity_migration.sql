@@ -525,6 +525,29 @@ begin
   end if;
 end $$;
 
+create or replace function public.enforce_issue_source_client_mutation_boundary()
+returns trigger
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+begin
+  if current_user in ('authenticated', 'anon')
+    and new.check_run_id is distinct from old.check_run_id then
+    raise exception 'Incident source evidence may only be changed by the trusted service boundary.'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.enforce_issue_source_client_mutation_boundary() from public;
+
+drop trigger if exists issues_source_client_mutation_boundary on public.issues;
+create trigger issues_source_client_mutation_boundary
+before update of check_run_id on public.issues
+for each row execute function public.enforce_issue_source_client_mutation_boundary();
+
 create or replace function public.enforce_issue_verification_truth()
 returns trigger
 language plpgsql
@@ -611,6 +634,7 @@ revoke all on function public.enforce_issue_verification_truth() from public;
 drop trigger if exists issues_enforce_verification_truth on public.issues;
 create trigger issues_enforce_verification_truth
 before insert or update of
+  check_run_id,
   status,
   repair_recorded_at,
   resolved_at,

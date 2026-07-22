@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-07-19",
+  "generator": "go run ./cmd/generate-iana",
+  "policy_fingerprint": "fe45e9e1319e944b74ac4eef402dc53e7765c2a20e7d528537a3d4df63a8f3dd",
+  "domain_denylist_sha256": "76e5b622bd37ad01ec8fd2c66a3ea59aba13f401ad2923afd072cd64eccf380e",
+  "policy_source_sha256": "520503890e13d0eb243538d4e32b8f29a00e1fc95c9de24a077770e43a800f82",
+  "registries": {
+    "ipv4": {
+      "source": "https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xml",
+      "updated": "2025-10-09",
+      "sha256": "cf24e11f41b7d42c68debe2d18b97cac815084ec413ebb3b244f704028a16f20",
+      "prefix_count": 26
+    },
+    "ipv6": {
+      "source": "https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xml",
+      "updated": "2025-10-09",
+      "sha256": "c17f4380ba84fb2160dae82ebfd8bd155a5853cfab624ed3a9fd251638a8be02",
+      "prefix_count": 25
+    }
+  }
+}

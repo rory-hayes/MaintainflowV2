@@ -59,6 +59,13 @@ from cron.job
 where jobname = 'maintainflow-run-evals';
 
 select jobid, jobname, schedule, active,
+  command like '%/api/cron/cleanup-browser-contexts%' as browser_context_cleanup_route_ready,
+  command ~* 'timeout_milliseconds\s*:=\s*60000' as transport_timeout_ready,
+  command ~* '''batchSize''\s*,\s*4' as four_context_cleanup_wave_ready
+from cron.job
+where jobname = 'maintainflow-cleanup-browser-contexts';
+
+select jobid, jobname, schedule, active,
   command like '%/api/cron/deliver-eval-alerts%' as eval_alert_route_ready,
   command ~* 'timeout_milliseconds\s*:=\s*60000' as transport_timeout_ready,
   command ~* '''batchSize''\s*,\s*10' as ten_alert_wave_ready
@@ -85,6 +92,16 @@ select count(*) = 1
   as business_evals_scheduler_ready
 from cron.job
 where jobname = 'maintainflow-run-evals';
+
+select count(*) = 1
+  and bool_and(active)
+  and bool_and(schedule = '* * * * *')
+  and bool_and(command like '%/api/cron/cleanup-browser-contexts%')
+  and bool_and(command ~* 'timeout_milliseconds\s*:=\s*60000')
+  and bool_and(command ~* '''batchSize''\s*,\s*4')
+  as browser_context_cleanup_scheduler_ready
+from cron.job
+where jobname = 'maintainflow-cleanup-browser-contexts';
 
 select count(*) = 1
   and bool_and(active)

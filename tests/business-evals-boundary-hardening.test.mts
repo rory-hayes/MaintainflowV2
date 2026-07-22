@@ -106,4 +106,51 @@ test("eval incident and note guards examine every old and new eval linkage", () 
   }
   assert.match(noteGuard, /old\.issue_id/)
   assert.match(noteGuard, /new\.issue_id/)
+  assert.match(noteGuard, /security invoker/)
+  assert.match(noteGuard, /current_user/)
+  assert.doesNotMatch(noteGuard, /security definer|session_user/)
+})
+
+test("legacy incident source evidence is member-immutable and every source update is revalidated", () => {
+  for (const path of [
+    "supabase/maintainflow_assurance_integrity_migration.sql",
+    "supabase/maintainflow_business_evals_migration.sql",
+    "supabase/maintainflow_schema.sql",
+  ]) {
+    const sql = readFileSync(path, "utf8")
+    assert.match(sql, /enforce_issue_source_client_mutation_boundary/)
+    assert.match(sql, /security invoker/)
+    assert.match(sql, /current_user in \('authenticated', 'anon'\)/)
+    assert.match(sql, /new\.check_run_id is distinct from old\.check_run_id/)
+    assert.match(sql, /before update of check_run_id on public\.issues/)
+  }
+
+  for (const path of [
+    "supabase/maintainflow_assurance_integrity_migration.sql",
+    "supabase/maintainflow_business_evals_migration.sql",
+    "supabase/maintainflow_schema.sql",
+  ]) {
+    const sql = readFileSync(path, "utf8")
+    const trigger = sql.match(/create trigger issues_enforce_verification_truth[\s\S]*?on public\.issues/)?.[0] ?? ""
+    assert.match(trigger, /check_run_id/)
+  }
+})
+
+test("incident repair writes its report-safe note and state atomically with compare-and-swap", () => {
+  const migration = readFileSync("supabase/maintainflow_business_evals_migration.sql", "utf8")
+  const incidents = readFileSync("src/lib/api/incidents.server.ts", "utf8")
+  const start = migration.indexOf("create or replace function public.record_business_eval_incident_repair")
+  const end = migration.indexOf("create or replace function public.enforce_business_eval_report_client_mutation_boundary", start)
+  const repair = migration.slice(start, end)
+
+  assert.match(repair, /for update/)
+  assert.match(repair, /saved\.updated_at is distinct from p_expected_updated_at/)
+  assert.match(repair, /insert into public\.issue_notes/)
+  assert.match(repair, /update public\.issues incident set/)
+  assert.match(migration, /revoke all on function public\.record_business_eval_incident_repair\(uuid,uuid,uuid,timestamptz,text\) from public, anon, authenticated/)
+  assert.match(migration, /grant execute on function public\.record_business_eval_incident_repair\(uuid,uuid,uuid,timestamptz,text\) to service_role/)
+  assert.match(incidents, /rpc\/record_business_eval_incident_repair/)
+  assert.match(incidents, /p_expected_updated_at: incident\.updatedAt/)
+  assert.match(incidents, /updated_at: `eq\.\$\{incident\.updatedAt\}`/)
+  assert.doesNotMatch(incidents, /await supabaseServiceJson\("issue_notes"/)
 })

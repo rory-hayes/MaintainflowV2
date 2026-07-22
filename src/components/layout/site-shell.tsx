@@ -33,6 +33,7 @@ export function SiteShell({ children }: { children: ReactNode }) {
     "/onboarding",
   ]
   const authRoutePrefixes = [
+    "/auth",
     "/login",
     "/signup",
     "/sign-in",

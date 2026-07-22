@@ -275,7 +275,6 @@ export async function publishJourney(input: {
   journeyId: string
   userId: string
   expectedDraftRevision: number
-  supervisedRunId?: string
 }) {
   const journey = await getJourney(input.agencyId, input.journeyId)
   assertJourneyNotArchived(journey)

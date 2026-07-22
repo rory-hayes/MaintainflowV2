@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 
 import { businessEvalsErrorResponse, requireBusinessEvalsAuth } from "@/lib/api/business-evals-auth.server"
+import { parseRequestJson } from "@/lib/api/business-evals-contracts"
 import { inviteWorkspaceTeamMember, listWorkspaceTeam } from "@/lib/api/workspace-settings.server"
 
 export const runtime = "nodejs"
@@ -24,7 +25,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const auth = await requireBusinessEvalsAuth(request, { roles: ["owner", "admin"] })
-    const input = inviteSchema.parse(await request.json().catch(() => null))
+    const input = await parseRequestJson(request, inviteSchema)
     return NextResponse.json({
       ok: true,
       data: await inviteWorkspaceTeamMember({

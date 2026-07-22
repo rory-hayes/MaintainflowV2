@@ -6,6 +6,8 @@ import {
   type ReportBundleConfig,
 } from "./report-bundle.server.ts"
 import { createReportPdfStoragePath, encodeStorageObjectPath, REPORT_PDF_BUCKET } from "./report-storage-path.ts"
+import { isSupabasePublicApiKey, isSupabaseServiceApiKey, supabaseServiceAuthHeaders } from "./api-key-roles.ts"
+import { isApprovedSupabaseOriginSet } from "./origin-policy.ts"
 
 export class ReportPdfStorageError extends Error {
   status: number
@@ -20,6 +22,8 @@ export class ReportPdfStorageError extends Error {
 export type ReportPdfStorageConfig = ReturnType<typeof getReportPdfStorageConfig>
 type ReportPdfStorageEnv = {
   NEXT_PUBLIC_SUPABASE_URL?: string
+  NEXT_PUBLIC_SUPABASE_AUTH_URL?: string
+  NEXT_PUBLIC_SUPABASE_PROJECT_REF?: string
   NEXT_PUBLIC_SUPABASE_ANON_KEY?: string
   SUPABASE_SERVICE_ROLE_KEY?: string
 }
@@ -35,8 +39,20 @@ export function getReportPdfStorageConfig(env?: ReportPdfStorageEnv) {
   const supabaseUrl = source.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/+$/, "") ?? ""
   const anonKey = source.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ""
   const serviceRoleKey = source.SUPABASE_SERVICE_ROLE_KEY ?? ""
+  const authUrl = source.NEXT_PUBLIC_SUPABASE_AUTH_URL?.replace(/\/+$/, "") || supabaseUrl
   return {
-    enabled: Boolean(supabaseUrl && anonKey && serviceRoleKey),
+    enabled: Boolean(
+      supabaseUrl
+      && isApprovedSupabaseOriginSet({
+        supabaseUrl,
+        authUrl,
+        expectedProjectRef: source.NEXT_PUBLIC_SUPABASE_PROJECT_REF,
+        nodeEnv: process.env.NODE_ENV,
+      })
+      && isSupabasePublicApiKey(anonKey)
+      && isSupabaseServiceApiKey(serviceRoleKey)
+      && anonKey.trim() !== serviceRoleKey.trim()
+    ),
     supabaseUrl,
     anonKey,
     serviceRoleKey,
@@ -79,8 +95,7 @@ export async function prepareAndStoreAuthorizedReportPdf(
     {
       method: "POST",
       headers: {
-        apikey: config.serviceRoleKey,
-        Authorization: `Bearer ${config.serviceRoleKey}`,
+        ...supabaseServiceAuthHeaders(config.serviceRoleKey),
         "Content-Type": "application/pdf",
         "Cache-Control": "private, max-age=0, must-revalidate",
         "x-upsert": "false",

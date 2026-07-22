@@ -91,7 +91,8 @@ test("rollback browser sync delegates client and workflow writes to the authenti
 
   assert.match(route, /requireBusinessEvalsAuth\(request/)
   assert.match(route, /featureGate: false/)
-  assert.match(route, /roles: \["owner", "admin", "member"\]/)
+  assert.match(route, /roles: \["owner", "admin"\]/)
+  assert.doesNotMatch(route, /roles: \[[^\]]*"member"/)
   assert.match(route, /parseRequestJson\(request, legacyCoreSyncRequestSchema\)/)
   assert.match(route, /agencyId: auth\.workspace\.id/)
   assert.match(route, /userId: auth\.user\.id/)

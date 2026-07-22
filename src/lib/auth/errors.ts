@@ -5,7 +5,7 @@ const supabaseErrorMap: Array<{ match: RegExp; message: string }> = [
   },
   {
     match: /supabase did not return a user for this signup/i,
-    message: "Account created. Check your email for the Maintain Flow confirmation link, then log in.",
+    message: "Account created. Check your email for the Maintain Flow confirmation link. You can open it in any current browser or device, then log in.",
   },
   {
     match: /user already registered|already registered|already exists/i,
@@ -30,7 +30,7 @@ const supabaseErrorMap: Array<{ match: RegExp; message: string }> = [
 ]
 
 export const SIGNUP_CONFIRMATION_MESSAGE =
-  "Account created. Check your email for the Maintain Flow confirmation link, then log in."
+  "Account created. Check your email for the Maintain Flow confirmation link. You can open it in any current browser or device, then log in."
 
 export class SignupConfirmationRequiredError extends Error {
   constructor() {

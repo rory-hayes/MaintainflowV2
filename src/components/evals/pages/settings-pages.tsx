@@ -28,11 +28,12 @@ import {
   type BillingInterval,
   type CheckoutBillingPlanId,
 } from "@/lib/billing/plans"
+import { reconcileStripeCheckoutFromBrowser } from "@/lib/billing/stripe-checkout-client"
 import { getValidSupabaseAccessToken } from "@/lib/supabase/auth"
 import { IconBell, IconCreditCard, IconSettings, IconTrash, IconUsers } from "@tabler/icons-react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
-import { useState, type FormEvent, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { type ZodType, z } from "zod"
 import { useEvals } from "../evals-provider"
 import { EvalPage, PageHeading } from "../page-primitives"
@@ -201,16 +202,102 @@ function AlertSettings() {
 }
 
 function BillingSettings() {
-  const { data, loading, error, workspaceId, previewMode } = useSettingsResource("/api/settings/billing", billingSettingsResponseSchema)
+  const { data, loading, error, reload, workspaceId, previewMode } = useSettingsResource("/api/settings/billing", billingSettingsResponseSchema)
   const searchParams = useSearchParams()
   const searchKey = searchParams.toString()
+  const billingReturn = searchParams.get("billing")
+  const checkoutSessionId = searchParams.get("session_id") ?? ""
   const requestedSelection = readCheckoutBillingSelection(searchParams)
   const [opening, setOpening] = useState(false)
   const [checkoutPlan, setCheckoutPlan] = useState<CheckoutBillingPlanId | "">("")
+  const checkoutOpeningRef = useRef(false)
   const [selection, setSelection] = useState(() => ({ searchKey, ...requestedSelection }))
   const [message, setMessage] = useState("")
   const selectedPlan = selection.searchKey === searchKey ? selection.plan : requestedSelection.plan
   const interval = selection.searchKey === searchKey ? selection.interval : requestedSelection.interval
+
+  useEffect(() => {
+    if (billingReturn === "checkout-cancelled") {
+      setMessage("Checkout was cancelled before the plan changed.")
+      return
+    }
+    if (billingReturn !== "portal-return") return
+
+    let cancelled = false
+    let refreshed = false
+    const returnMessage = "Returned from Stripe customer portal. Finished checking for Stripe's latest billing status."
+    setMessage("Refreshing the latest Stripe billing status...")
+
+    const refreshBilling = async (finalAttempt: boolean) => {
+      try {
+        await reload()
+        refreshed = true
+        if (finalAttempt && !cancelled) setMessage(returnMessage)
+      } catch (cause) {
+        if (finalAttempt && !cancelled) {
+          setMessage(refreshed
+            ? returnMessage
+            : cause instanceof Error
+              ? cause.message
+              : "Billing status could not be refreshed.")
+        }
+      }
+    }
+
+    void refreshBilling(false)
+    const retryIds = [1_500, 3_000, 5_000].map((delay, index, delays) => window.setTimeout(() => {
+      void refreshBilling(index === delays.length - 1)
+    }, delay))
+    return () => {
+      cancelled = true
+      retryIds.forEach((retryId) => window.clearTimeout(retryId))
+    }
+  }, [billingReturn, reload])
+
+  useEffect(() => {
+    if (billingReturn !== "checkout-success") return
+    if (!checkoutSessionId) {
+      setMessage("Stripe returned without a Checkout Session ID, so Maintain Flow did not change paid access.")
+      return
+    }
+    if (!workspaceId) return
+
+    let cancelled = false
+    let settled = false
+    setMessage("Confirming this exact Stripe Checkout Session...")
+
+    const reconcile = async (finalAttempt: boolean) => {
+      if (cancelled || settled) return
+      try {
+        const result = await reconcileStripeCheckoutFromBrowser({ workspaceId, sessionId: checkoutSessionId })
+        if (result.status === "active") {
+          settled = true
+          await reload()
+          if (!cancelled) setMessage(result.message)
+          return
+        }
+        if (result.status === "expired") {
+          settled = true
+          if (!cancelled) setMessage(result.message)
+          return
+        }
+        if (finalAttempt && !cancelled) setMessage(result.message)
+      } catch (cause) {
+        if (finalAttempt && !cancelled) {
+          setMessage(cause instanceof Error ? cause.message : "Stripe checkout could not be confirmed.")
+        }
+      }
+    }
+
+    void reconcile(false)
+    const retryIds = [1_500, 3_000, 5_000].map((delay, index, delays) => window.setTimeout(() => {
+      void reconcile(index === delays.length - 1)
+    }, delay))
+    return () => {
+      cancelled = true
+      retryIds.forEach((retryId) => window.clearTimeout(retryId))
+    }
+  }, [billingReturn, checkoutSessionId, reload, workspaceId])
 
   function chooseInterval(nextInterval: BillingInterval) {
     setSelection({ searchKey, plan: selectedPlan, interval: nextInterval })
@@ -238,6 +325,8 @@ function BillingSettings() {
   }
 
   async function openCheckout(plan: CheckoutBillingPlanId) {
+    if (checkoutOpeningRef.current) return
+    checkoutOpeningRef.current = true
     setSelection({ searchKey, plan, interval })
     setCheckoutPlan(plan)
     setMessage("")
@@ -245,6 +334,7 @@ function BillingSettings() {
       if (previewMode) {
         setMessage(`Preview only: ${billingPlans[plan].name} checkout will open after Stripe is connected.`)
         setCheckoutPlan("")
+        checkoutOpeningRef.current = false
         return
       }
       const token = await getValidSupabaseAccessToken()
@@ -265,17 +355,18 @@ function BillingSettings() {
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "Checkout could not be opened.")
       setCheckoutPlan("")
+      checkoutOpeningRef.current = false
     }
   }
 
   const checkoutPlans = [billingPlans.starter, billingPlans.growth, billingPlans.scale] as const
   const selectedPlanDetails = selectedPlan ? billingPlans[selectedPlan] : null
   const selectedPlanDisplay = selectedPlanDetails ? billingPriceDisplay(selectedPlanDetails, interval) : null
-  return <SettingsCard title="Plan and usage" description="Business eval capacity for this workspace."><SettingsState loading={loading} error={error}>{data ? <><div className="mb-5 flex flex-col gap-2 rounded-lg bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between"><span><span className="block text-xs text-slate-500">Current plan</span><span className="mt-1 block text-xl font-semibold text-slate-950">{data.plan.name}</span></span><span className="text-sm capitalize text-slate-600">{data.trial.active && data.trial.endsAt ? `Trial ends ${new Date(data.trial.endsAt).toLocaleDateString("en-IE")}` : data.plan.state}</span></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Usage label="Projects" used={data.usage.projects.used} limit={data.usage.projects.limit} /><Usage label="Journeys" used={data.usage.journeys.used} limit={data.usage.journeys.limit} /><Usage label="Monthly runs" used={data.usage.runs.used} limit={data.usage.runs.limit} /><Usage label="Seats" used={data.usage.seats.used} limit={data.usage.seats.limit} /></div><p className="mt-4 text-sm text-slate-600">Evidence retention: {data.usage.evidenceRetentionDays} days.</p>{data.subscription.portalAvailable ? <Button type="button" onClick={openPortal} disabled={opening} className="mt-5 rounded-md bg-blue-600 hover:bg-blue-700">{opening ? "Opening…" : "Manage billing"}</Button> : null}{selectedPlanDetails && selectedPlanDisplay ? <div role="status" className="mt-7 rounded-lg border border-blue-200 bg-blue-50 p-4"><span className="text-xs font-semibold uppercase tracking-wide text-blue-700">Selected from pricing</span><p className="mt-1 text-base font-semibold text-slate-950">{selectedPlanDetails.name} · {interval === "annual" ? "Annual" : "Monthly"}</p><p className="mt-1 text-sm text-slate-600">{selectedPlanDisplay.amount} {selectedPlanDisplay.suffix}. {selectedPlanDisplay.note}</p><p className="mt-2 text-xs text-blue-800">Review the plan below. Stripe checkout opens only after you choose the plan button.</p></div> : null}<div className="mt-8 flex flex-col gap-3 border-t border-slate-200 pt-6 sm:flex-row sm:items-end sm:justify-between"><span><span className="block text-lg font-semibold text-slate-950">Choose a paid plan</span><span className="mt-1 block text-sm text-slate-500">Solo, Team and Agency include email proof, live report links and PDF exports.</span></span><Field className="sm:w-48"><FieldLabel htmlFor="billing-interval">Billing interval</FieldLabel><NativeSelect id="billing-interval" value={interval} onChange={(event) => chooseInterval(event.target.value as BillingInterval)}><NativeSelectOption value="monthly">Monthly</NativeSelectOption><NativeSelectOption value="annual">Annual · save {annualBillingDiscountPercent}%</NativeSelectOption></NativeSelect></Field></div><div className="mt-4 grid gap-3 xl:grid-cols-3">{checkoutPlans.map((plan) => {
+  return <SettingsCard title="Plan and usage" description="Business eval capacity for this workspace."><SettingsState loading={loading} error={error}>{data ? <><div className="mb-5 flex flex-col gap-2 rounded-lg bg-slate-50 p-4 sm:flex-row sm:items-center sm:justify-between"><span><span className="block text-xs text-slate-500">Current plan</span><span className="mt-1 block text-xl font-semibold text-slate-950">{data.plan.name}</span></span><span className="text-sm capitalize text-slate-600">{data.trial.active && data.trial.endsAt ? `Trial ends ${new Date(data.trial.endsAt).toLocaleDateString("en-IE")}` : data.plan.state}</span></div><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Usage label="Projects" used={data.usage.projects.used} limit={data.usage.projects.limit} /><Usage label="Journeys" used={data.usage.journeys.used} limit={data.usage.journeys.limit} /><Usage label="Monthly runs" used={data.usage.runs.used} limit={data.usage.runs.limit} /><Usage label="Seats" used={data.usage.seats.used} limit={data.usage.seats.limit} /></div><p className="mt-4 text-sm text-slate-600">Evidence retention: {data.usage.evidenceRetentionDays} days.</p><div className="mt-6 rounded-lg border border-slate-200 p-4"><div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between"><span><span className="block text-sm font-semibold text-slate-950">Managed browser usage</span><span className="mt-1 block text-xs text-slate-500">Provider-timestamp session activity for this workspace in the current calendar month. This is not Browserbase billed project minutes.</span></span><span className="text-xs text-slate-500">{data.usage.browser.measuredThrough ? `Measured through ${new Date(data.usage.browser.measuredThrough).toLocaleString("en-IE")}` : "No metered sessions yet"}</span></div><div className="mt-4 grid gap-3 sm:grid-cols-3"><UsageMetric label="Session active time" value={`${data.usage.browser.sessionActiveMinutes.toFixed(2)} min`} /><UsageMetric label="Proxy data" value={`${data.usage.browser.proxyMegabytes.toFixed(2)} MB`} /><UsageMetric label="Sessions" value={String(data.usage.browser.sessions)} /></div>{data.usage.browser.warning ? <p role={data.usage.browser.status === "paused" ? "alert" : "status"} className={`mt-3 rounded-md px-3 py-2 text-xs ${data.usage.browser.status === "paused" ? "bg-red-50 text-red-700" : data.usage.browser.status === "warning" ? "bg-amber-50 text-amber-800" : "bg-slate-50 text-slate-600"}`}>{data.usage.browser.warning}</p> : null}</div>{data.subscription.portalAvailable ? <Button type="button" onClick={openPortal} disabled={opening} className="mt-5 rounded-md bg-blue-600 hover:bg-blue-700">{opening ? "Opening…" : "Manage billing"}</Button> : null}{selectedPlanDetails && selectedPlanDisplay ? <div role="status" className="mt-7 rounded-lg border border-blue-200 bg-blue-50 p-4"><span className="text-xs font-semibold uppercase tracking-wide text-blue-700">Selected from pricing</span><p className="mt-1 text-base font-semibold text-slate-950">{selectedPlanDetails.name} · {interval === "annual" ? "Annual" : "Monthly"}</p><p className="mt-1 text-sm text-slate-600">{selectedPlanDisplay.amount} {selectedPlanDisplay.suffix}. {selectedPlanDisplay.note}</p><p className="mt-2 text-xs text-blue-800">Review the plan below. Stripe checkout opens only after you choose the plan button.</p></div> : null}<div className="mt-8 flex flex-col gap-3 border-t border-slate-200 pt-6 sm:flex-row sm:items-end sm:justify-between"><span><span className="block text-lg font-semibold text-slate-950">Choose a paid plan</span><span className="mt-1 block text-sm text-slate-500">Solo, Team and Agency include email proof, live report links and PDF exports.</span></span><Field className="sm:w-48"><FieldLabel htmlFor="billing-interval">Billing interval</FieldLabel><NativeSelect id="billing-interval" value={interval} onChange={(event) => chooseInterval(event.target.value as BillingInterval)}><NativeSelectOption value="monthly">Monthly</NativeSelectOption><NativeSelectOption value="annual">Annual · save {annualBillingDiscountPercent}%</NativeSelectOption></NativeSelect></Field></div><div className="mt-4 grid gap-3 xl:grid-cols-3">{checkoutPlans.map((plan) => {
         const display = billingPriceDisplay(plan, interval)
         const current = data.plan.id === plan.id
         const selected = selectedPlan === plan.id
-        return <div key={plan.id} className={`flex flex-col rounded-lg border p-4 ${selected ? "border-blue-600 bg-blue-50/60 ring-2 ring-blue-100" : current ? "border-blue-300 bg-blue-50/30" : "border-slate-200"}`}><div className="flex items-center justify-between gap-3"><span className="font-semibold text-slate-950">{plan.name}</span><span className="flex flex-wrap justify-end gap-1">{selected ? <span className="rounded-full bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span> : null}{current ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">Current</span> : null}</span></div><p className="mt-2 text-2xl font-semibold text-slate-950">{display.amount}<span className="ml-1 text-xs font-normal text-slate-500">{display.suffix}</span></p><p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">{plan.description}</p><p className="mt-3 text-xs text-slate-600">{plan.businessEvalLimits.projects} projects · {plan.businessEvalLimits.journeys} journeys · {plan.businessEvalLimits.seats} seats</p><Button type="button" variant={selected || plan.id === "growth" ? "default" : "outline"} onClick={() => openCheckout(plan.id as CheckoutBillingPlanId)} disabled={Boolean(checkoutPlan) || data.subscription.portalAvailable} className={`mt-4 w-full rounded-md ${selected || plan.id === "growth" ? "bg-blue-600 hover:bg-blue-700" : "border-slate-200"}`}>{checkoutPlan === plan.id ? "Opening checkout…" : selected ? `Continue with ${plan.name}` : `Choose ${plan.name}`}</Button><p className="mt-2 min-h-10 text-xs leading-5 text-slate-500">{data.subscription.portalAvailable ? "Use Manage billing to change an existing subscription." : display.note}</p></div>
+        return <div key={plan.id} className={`flex flex-col rounded-lg border p-4 ${selected ? "border-blue-600 bg-blue-50/60 ring-2 ring-blue-100" : current ? "border-blue-300 bg-blue-50/30" : "border-slate-200"}`}><div className="flex items-center justify-between gap-3"><span className="font-semibold text-slate-950">{plan.name}</span><span className="flex flex-wrap justify-end gap-1">{selected ? <span className="rounded-full bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">Selected</span> : null}{current ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">Current</span> : null}</span></div><p className="mt-2 text-2xl font-semibold text-slate-950">{display.amount}<span className="ml-1 text-xs font-normal text-slate-500">{display.suffix}</span></p><p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">{plan.description}</p><p className="mt-3 text-xs text-slate-600">{plan.businessEvalLimits.projects} projects · {plan.businessEvalLimits.journeys} journeys · {plan.businessEvalLimits.seats} seats</p><Button type="button" variant={selected || plan.id === "growth" ? "default" : "outline"} onClick={() => openCheckout(plan.id as CheckoutBillingPlanId)} disabled={Boolean(checkoutPlan) || data.subscription.portalAvailable} className={`mt-4 w-full rounded-md ${selected || plan.id === "growth" ? "bg-blue-600 hover:bg-blue-700" : "border-slate-200"}`}>{checkoutPlan === plan.id ? "Opening checkout…" : selected ? `Continue with ${plan.name}` : `Choose ${plan.name}`}</Button><p className="mt-2 min-h-10 text-xs leading-5 text-slate-500">{data.subscription.portalAvailable ? "A linked subscription is managed in Stripe Customer Portal; starting a second Checkout is disabled." : display.note}</p></div>
       })}</div>{!data.subscription.portalAvailable && data.subscription.portalUnavailableReason ? <p className="mt-3 text-xs text-slate-500">{data.subscription.portalUnavailableReason}</p> : null}<Feedback message={message} /></> : null}</SettingsState></SettingsCard>
 }
 
@@ -288,6 +379,11 @@ function useSettingsResource<TSchema extends ZodType>(path: string, schema: TSch
     queryFn: () => businessEvalsRequest(path, schema, { workspaceId }),
     staleTime: 15_000,
   })
+  const refetch = query.refetch
+  const reload = useCallback(async () => {
+    if (previewMode) return
+    await refetch()
+  }, [previewMode, refetch])
   const previewData = previewMode ? schema.parse(previewSettingsFixture(path)) : null
   return {
     data: (previewData ?? query.data?.data ?? null) as z.infer<TSchema> | null,
@@ -295,7 +391,7 @@ function useSettingsResource<TSchema extends ZodType>(path: string, schema: TSch
     error: previewMode ? "" : query.error instanceof Error ? query.error.message : query.error ? "Settings could not be loaded." : "",
     workspaceId,
     previewMode,
-    reload: previewMode ? async () => undefined : () => query.refetch(),
+    reload,
   }
 }
 
@@ -345,6 +441,7 @@ function previewSettingsFixture(path: string): unknown {
         runs: { used: 142, limit: 7_500 },
         seats: { used: 2, limit: 5 },
         evidenceRetentionDays: 90,
+        browser: { sessionActiveMinutes: 286.42, proxyBytes: 192_937_984, proxyMegabytes: 184.0, sessions: 142, measuredThrough: "2026-07-18T10:45:00.000Z", status: "healthy", warning: "" },
       },
       features: { email: true, webhook: true, liveLink: true, pdf: true, whiteLabel: false },
       trial: { startedAt: "2026-07-12T09:00:00.000Z", endsAt: "2026-07-26T09:00:00.000Z", usedAt: "2026-07-12T09:00:00.000Z", active: true },
@@ -370,6 +467,10 @@ function Feedback({ message }: { message: string }) {
 
 function Usage({ label, used, limit }: { label: string; used: number; limit: number | null }) {
   return <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">{label}</span><span className="mt-1 block text-xl font-semibold text-slate-950">{used} / {limit ?? "∞"}</span></div>
+}
+
+function UsageMetric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-md bg-slate-50 p-3"><span className="text-xs text-slate-500">{label}</span><span className="mt-1 block text-base font-semibold text-slate-950">{value}</span></div>
 }
 
 function initials(value: string) {

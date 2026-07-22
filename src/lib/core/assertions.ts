@@ -152,7 +152,7 @@ function readJsonPath(value: unknown, path: string) {
   }
 
   return path.split(".").reduce<unknown>((current, segment) => {
-    if (current && typeof current === "object" && segment in current) {
+    if (current && typeof current === "object" && Object.hasOwn(current, segment)) {
       return (current as Record<string, unknown>)[segment]
     }
 

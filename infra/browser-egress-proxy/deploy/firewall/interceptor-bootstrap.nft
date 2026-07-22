@@ -1,0 +1,24 @@
+table inet mf_interceptor_boundary {
+  set approved_dialers_v6 {
+    type ipv6_addr
+  }
+
+  chain output {
+    type filter hook output priority filter; policy drop;
+
+    oifname "lo" accept
+    ct state established,related accept
+
+    # IPv6 neighbour/router discovery is control-plane traffic required before
+    # the first 6PN packet. The workload later runs without CAP_NET_RAW.
+    icmpv6 type { 133, 134, 135, 136 } accept
+
+    # Fly's Machine-local resolver is the only permitted DNS destination.
+    ip6 daddr fdaa::3 udp dport 53 accept
+    ip6 daddr fdaa::3 tcp dport 53 accept
+
+    # The set starts empty. Startup resolves the reviewed .internal hostname
+    # through fdaa::3, validates every answer as 6PN, then populates it.
+    ip6 daddr @approved_dialers_v6 tcp dport 9443 accept
+  }
+}

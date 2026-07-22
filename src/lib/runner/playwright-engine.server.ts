@@ -24,7 +24,7 @@ import type {
   RunnerArtifact,
   RunnerStageResult,
 } from "@/lib/runner/types"
-import { ordinaryClickLooksDestructive } from "@/lib/runner/action-safety"
+import { inProductCleanupLooksLikeAccountDeletion, ordinaryClickLooksDestructive } from "@/lib/runner/action-safety"
 
 type ConnectedBrowser = {
   browser: Browser
@@ -66,7 +66,7 @@ export async function executeWithConnectedBrowser(
   input: ExecuteBrowserPhaseInput,
   connected: ConnectedBrowser
 ): Promise<BrowserPhaseResult> {
-  const { browser, page, session } = connected
+  const { page, session } = connected
   const stages: RunnerStageResult[] = []
   const artifacts: RunnerArtifact[] = []
   let captchaDetected = false
@@ -190,8 +190,7 @@ export async function executeWithConnectedBrowser(
       traceStarted = false
     }
     if (traceStarted) await connected.context.tracing.stop().catch(() => undefined)
-    await connected.beforeDisconnect?.().catch(() => undefined)
-    await browser.close().catch(() => undefined)
+    await connected.beforeDisconnect?.()
   }
 }
 
@@ -397,6 +396,13 @@ async function executeAction(
         throw new StageExecutionError("CLEANUP_WEBHOOK_REQUIRED", "Customer-owned cleanup webhooks run outside the browser phase.", "inconclusive")
       }
       if (!action.locator) throw new StageExecutionError("CLEANUP_LOCATOR_MISSING", "The cleanup control is not configured.", "inconclusive")
+      if (!inProductCleanupLooksLikeAccountDeletion(action)) {
+        throw new StageExecutionError(
+          "CLEANUP_CONTROL_UNSAFE",
+          "The approved in-product cleanup must uniquely target a semantic account-deletion button.",
+          "inconclusive"
+        )
+      }
       const locator = await uniqueLocator(page, action.locator, timeout)
       await captureTransitionBaselines(page, pageObservation, action.id)
       await assertExecutionAllowed?.()
@@ -498,7 +504,7 @@ async function waitForUniqueVisibleAssertion(
 ) {
   const locator = locatorFromDefinition(page, definition)
   try {
-    await locator.first().waitFor({ state: "visible", timeout })
+    await locator.first().waitFor({ state: "attached", timeout })
   } catch (error) {
     await failDeterministicAssertionTimeout({
       page,
@@ -516,6 +522,28 @@ async function waitForUniqueVisibleAssertion(
       "AMBIGUOUS_LOCATOR",
       count === 0 ? "The approved assertion element could not be found." : `The approved assertion locator matched ${count} elements.`,
       count === 0 ? "failed" : "inconclusive"
+    )
+  }
+
+  try {
+    await locator.waitFor({ state: "visible", timeout })
+  } catch (error) {
+    await failDeterministicAssertionTimeout({
+      page,
+      allowedHosts,
+      error,
+      pageObservation,
+      code: "VISIBLE_ASSERTION_NOT_MET",
+      message: `${label} was not visible within its configured threshold.`,
+    })
+  }
+
+  const visibleCount = await locator.count()
+  if (visibleCount !== 1) {
+    throw new StageExecutionError(
+      "AMBIGUOUS_LOCATOR",
+      visibleCount === 0 ? "The approved assertion element disappeared before it could be proven." : `The approved assertion locator matched ${visibleCount} elements.`,
+      visibleCount === 0 ? "failed" : "inconclusive"
     )
   }
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 
 import { businessEvalsErrorResponse, requireBusinessEvalsAuth } from "@/lib/api/business-evals-auth.server"
+import { parseRequestJson } from "@/lib/api/business-evals-contracts"
 import { getWorkspaceSettings, updateWorkspaceSettings } from "@/lib/api/workspace-settings.server"
 
 export const runtime = "nodejs"
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const auth = await requireBusinessEvalsAuth(request, { roles: ["owner", "admin"] })
-    const input = workspaceSettingsSchema.parse(await request.json().catch(() => null))
+    const input = await parseRequestJson(request, workspaceSettingsSchema)
     return NextResponse.json({
       ok: true,
       data: await updateWorkspaceSettings({ agencyId: auth.workspace.id, ...input }),

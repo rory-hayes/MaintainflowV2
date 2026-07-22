@@ -595,6 +595,28 @@ create table if not exists public.eval_runs (
   constraint eval_runs_id_agency_unique unique (id, agency_id)
 );
 
+-- Scheduled runs are system-attributed, while user-triggered runs retain a
+-- profile-bound audit actor for as long as that profile exists.
+alter table public.eval_runs alter column requested_by_user_id drop not null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'eval_runs_requested_by_user_fkey'
+      and conrelid = 'public.eval_runs'::regclass
+  ) then
+    alter table public.eval_runs add constraint eval_runs_requested_by_user_fkey
+      foreign key (requested_by_user_id) references public.profiles(id) on delete set null not valid;
+  end if;
+end $$;
+
+alter table public.eval_runs validate constraint eval_runs_requested_by_user_fkey;
+
+create index if not exists eval_runs_requested_by_user_idx
+  on public.eval_runs(requested_by_user_id)
+  where requested_by_user_id is not null;
+
 alter table public.eval_runs
   add column if not exists dispatch_state text not null default 'pending',
   add column if not exists dispatch_lease_expires_at timestamptz,
@@ -641,6 +663,125 @@ end $$;
 create unique index if not exists eval_runs_schedule_slot_uidx
   on public.eval_runs(schedule_id, scheduled_for)
   where schedule_id is not null and scheduled_for is not null;
+
+create table if not exists public.browser_context_leases (
+  id uuid primary key default gen_random_uuid(),
+  agency_id uuid not null references public.agencies(id) on delete cascade,
+  eval_run_id uuid not null,
+  context_id text not null,
+  context_id_hash text not null,
+  last_session_id text not null default '',
+  resume_url text not null default '',
+  sync_ready_at timestamptz,
+  delete_after timestamptz not null,
+  session_owner_token uuid,
+  session_lease_expires_at timestamptz,
+  cleanup_status text not null default 'active',
+  cleanup_requested_at timestamptz,
+  cleanup_reason_code text not null default '',
+  cleanup_attempts integer not null default 0,
+  cleanup_worker_id text not null default '',
+  cleanup_lease_expires_at timestamptz,
+  next_cleanup_at timestamptz,
+  last_cleanup_error_code text not null default '',
+  released_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint browser_context_leases_eval_run_fkey foreign key (eval_run_id, agency_id)
+    references public.eval_runs(id, agency_id) on delete cascade,
+  constraint browser_context_leases_eval_run_unique unique (eval_run_id),
+  constraint browser_context_leases_context_unique unique (context_id),
+  constraint browser_context_leases_context_id_valid check (
+    length(trim(context_id)) between 8 and 255
+    and context_id !~ '[[:space:][:cntrl:]]'
+    and context_id_hash ~ '^[a-f0-9]{64}$'
+  ),
+  constraint browser_context_leases_session_id_valid check (
+    last_session_id = '' or (
+      length(last_session_id) between 8 and 255
+      and last_session_id !~ '[[:space:][:cntrl:]]'
+    )
+  ),
+  constraint browser_context_leases_resume_url_safe check (
+    resume_url = '' or (
+      length(resume_url) <= 2048
+      and resume_url = trim(resume_url)
+      and resume_url ~ '^https://'
+      and resume_url !~ '[?#[:space:][:cntrl:]]'
+      and resume_url !~ '^https://[^/]*@'
+    )
+  ),
+  constraint browser_context_leases_delete_after_create check (delete_after > created_at),
+  constraint browser_context_leases_session_claim_valid check (
+    (session_owner_token is null and session_lease_expires_at is null)
+    or (session_owner_token is not null and session_lease_expires_at is not null)
+  ),
+  constraint browser_context_leases_cleanup_status_valid check (
+    cleanup_status in ('active', 'pending', 'claimed', 'deleted', 'failed')
+  ),
+  constraint browser_context_leases_cleanup_attempts_valid check (
+    cleanup_attempts >= 0
+  ),
+  constraint browser_context_leases_cleanup_state_valid check (
+    (
+      cleanup_status = 'active'
+      and cleanup_requested_at is null
+      and cleanup_reason_code = ''
+      and cleanup_worker_id = ''
+      and cleanup_lease_expires_at is null
+      and next_cleanup_at = delete_after
+      and released_at is null
+    ) or (
+      cleanup_status = 'pending'
+      and cleanup_requested_at is not null
+      and cleanup_reason_code ~ '^[A-Z0-9_]{3,64}$'
+      and cleanup_worker_id = ''
+      and cleanup_lease_expires_at is null
+      and next_cleanup_at is not null
+      and released_at is null
+    ) or (
+      cleanup_status = 'claimed'
+      and cleanup_requested_at is not null
+      and cleanup_reason_code ~ '^[A-Z0-9_]{3,64}$'
+      and cleanup_worker_id ~ '^[A-Za-z0-9:_-]{8,128}$'
+      and cleanup_lease_expires_at is not null
+      and next_cleanup_at = cleanup_lease_expires_at
+      and released_at is null
+      and session_owner_token is null
+      and session_lease_expires_at is null
+    ) or (
+      cleanup_status = 'deleted'
+      and cleanup_worker_id = ''
+      and cleanup_lease_expires_at is null
+      and next_cleanup_at is null
+      and released_at is not null
+      and session_owner_token is null
+      and session_lease_expires_at is null
+    ) or (
+      cleanup_status = 'failed'
+      and cleanup_attempts > 0
+      and cleanup_worker_id = ''
+      and cleanup_lease_expires_at is null
+      and next_cleanup_at is not null
+      and last_cleanup_error_code ~ '^[A-Z0-9_]{3,64}$'
+      and released_at is null
+      and session_owner_token is null
+      and session_lease_expires_at is null
+    )
+  ),
+  constraint browser_context_leases_id_agency_unique unique (id, agency_id)
+);
+
+create index if not exists browser_context_leases_agency_created_idx
+  on public.browser_context_leases(agency_id, created_at desc);
+create index if not exists browser_context_leases_cleanup_due_idx
+  on public.browser_context_leases(next_cleanup_at, id)
+  where cleanup_status in ('active', 'pending', 'claimed', 'failed');
+
+drop trigger if exists browser_context_leases_set_updated_at on public.browser_context_leases;
+create trigger browser_context_leases_set_updated_at
+before update on public.browser_context_leases
+for each row execute function public.set_updated_at();
 
 create table if not exists public.eval_run_side_effect_attempts (
   id uuid primary key default gen_random_uuid(),
@@ -713,8 +854,8 @@ create table if not exists public.ai_assistance_requests (
     references public.eval_runs(id, agency_id) on delete cascade,
   constraint ai_assistance_requests_legacy_run_fkey foreign key (legacy_check_run_id, agency_id)
     references public.check_runs(id, agency_id) on delete cascade,
-  constraint ai_assistance_requests_actor_membership_fkey foreign key (agency_id, actor_user_id)
-    references public.memberships(agency_id, user_id) on delete restrict,
+  constraint ai_assistance_requests_actor_profile_fkey foreign key (actor_user_id)
+    references public.profiles(id) on delete restrict,
   constraint ai_assistance_requests_kind_valid check (request_kind in ('journey_draft', 'run_diagnosis')),
   constraint ai_assistance_requests_status_valid check (status in ('processing', 'completed', 'refused', 'failed')),
   constraint ai_assistance_requests_hashes_valid check (
@@ -740,10 +881,31 @@ create table if not exists public.ai_assistance_requests (
   constraint ai_assistance_requests_id_agency_unique unique (id, agency_id)
 );
 
+-- Membership is authorization state, not the durable identity of the actor.
+-- Historical AI requests must survive a later workspace-member removal.
+alter table public.ai_assistance_requests
+  drop constraint if exists ai_assistance_requests_actor_membership_fkey;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'ai_assistance_requests_actor_profile_fkey'
+      and conrelid = 'public.ai_assistance_requests'::regclass
+  ) then
+    alter table public.ai_assistance_requests add constraint ai_assistance_requests_actor_profile_fkey
+      foreign key (actor_user_id) references public.profiles(id) on delete restrict not valid;
+  end if;
+end $$;
+
+alter table public.ai_assistance_requests validate constraint ai_assistance_requests_actor_profile_fkey;
+
 create index if not exists ai_assistance_requests_agency_created_idx
   on public.ai_assistance_requests(agency_id, created_at desc);
 create index if not exists ai_assistance_requests_processing_idx
   on public.ai_assistance_requests(updated_at) where status = 'processing';
+create index if not exists ai_assistance_requests_actor_user_idx
+  on public.ai_assistance_requests(actor_user_id);
 
 create table if not exists public.eval_stage_runs (
   id uuid primary key default gen_random_uuid(),
@@ -1299,6 +1461,29 @@ alter table public.issues add constraint issues_verified_resolution_truth_check 
   )
 );
 
+create or replace function public.enforce_issue_source_client_mutation_boundary()
+returns trigger
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+begin
+  if current_user in ('authenticated', 'anon')
+    and new.check_run_id is distinct from old.check_run_id then
+    raise exception 'Incident source evidence may only be changed by the trusted service boundary.'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.enforce_issue_source_client_mutation_boundary() from public;
+
+drop trigger if exists issues_source_client_mutation_boundary on public.issues;
+create trigger issues_source_client_mutation_boundary
+before update of check_run_id on public.issues
+for each row execute function public.enforce_issue_source_client_mutation_boundary();
+
 create or replace function public.enforce_issue_verification_truth()
 returns trigger
 language plpgsql
@@ -1376,6 +1561,28 @@ begin
 end;
 $$;
 
+revoke all on function public.enforce_issue_verification_truth() from public;
+
+drop trigger if exists issues_enforce_verification_truth on public.issues;
+create trigger issues_enforce_verification_truth
+before insert or update of
+  check_run_id,
+  status,
+  repair_recorded_at,
+  resolved_at,
+  verification_run_id,
+  verification_eval_run_id,
+  resolution_note,
+  report_safe_summary,
+  reportable,
+  agency_id,
+  client_id,
+  workflow_id,
+  check_id,
+  eval_run_id
+on public.issues
+for each row execute function public.enforce_issue_verification_truth();
+
 create or replace function public.enforce_eval_incident_client_mutation_boundary()
 returns trigger
 language plpgsql
@@ -1418,11 +1625,11 @@ for each row execute function public.enforce_eval_incident_client_mutation_bound
 create or replace function public.enforce_eval_incident_note_client_mutation_boundary()
 returns trigger
 language plpgsql
-security definer
+security invoker
 set search_path = public, pg_temp
 as $$
 declare
-  request_role text := coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), session_user);
+  request_role text := coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), current_user);
 begin
   if request_role in ('authenticated', 'anon') and (
     (tg_op <> 'INSERT' and exists (
@@ -1444,6 +1651,63 @@ drop trigger if exists issue_notes_eval_incident_client_boundary on public.issue
 create trigger issue_notes_eval_incident_client_boundary
 before insert or update or delete on public.issue_notes
 for each row execute function public.enforce_eval_incident_note_client_mutation_boundary();
+
+
+create or replace function public.record_business_eval_incident_repair(
+  p_agency_id uuid,
+  p_issue_id uuid,
+  p_user_id uuid,
+  p_expected_updated_at timestamptz,
+  p_note text
+)
+returns setof public.issues
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  saved public.issues%rowtype;
+  normalized_note text := btrim(coalesce(p_note, ''));
+  recorded_at timestamptz := clock_timestamp();
+begin
+  if length(normalized_note) not between 1 and 4000 then
+    raise exception 'INCIDENT_REPAIR_NOTE_INVALID' using errcode = '22023';
+  end if;
+  if not exists (
+    select 1 from public.memberships
+    where agency_id = p_agency_id and user_id = p_user_id
+  ) then
+    raise exception 'INCIDENT_REPAIR_ACTOR_FORBIDDEN' using errcode = '42501';
+  end if;
+
+  select * into saved from public.issues
+  where id = p_issue_id and agency_id = p_agency_id
+  for update;
+  if not found then
+    raise exception 'INCIDENT_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if saved.updated_at is distinct from p_expected_updated_at then
+    raise exception 'INCIDENT_UPDATE_CONFLICT' using errcode = '40001';
+  end if;
+
+  insert into public.issue_notes (agency_id, issue_id, user_id, body, report_safe)
+  values (p_agency_id, p_issue_id, p_user_id, normalized_note, true);
+
+  update public.issues incident set
+    status = 'in_review',
+    repair_recorded_at = recorded_at,
+    resolved_at = null,
+    verification_eval_run_id = null,
+    verification_run_id = null,
+    resolution_note = normalized_note,
+    report_safe_summary = normalized_note,
+    snoozed_until = null,
+    updated_at = recorded_at
+  where incident.id = saved.id;
+
+  return query select * from public.issues where id = saved.id;
+end;
+$$;
 
 create or replace function public.enforce_business_eval_report_client_mutation_boundary()
 returns trigger
@@ -4807,11 +5071,442 @@ begin
 end;
 $$;
 
+drop function if exists public.register_browser_context_lease(uuid,text,timestamptz);
+create or replace function public.register_browser_context_lease(
+  p_eval_run_id uuid,
+  p_context_id text,
+  p_delete_after timestamptz
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  target_run public.eval_runs%rowtype;
+  existing_lease public.browser_context_leases%rowtype;
+begin
+  if p_context_id is null
+    or length(trim(p_context_id)) not between 8 and 255
+    or p_context_id ~ '[[:space:][:cntrl:]]'
+    or p_delete_after is null
+    or p_delete_after <= now()
+    or p_delete_after > now() + interval '24 hours' then
+    raise exception 'BROWSER_CONTEXT_LEASE_INVALID' using errcode = '22023';
+  end if;
+
+  select run.* into target_run
+  from public.eval_runs run
+  where run.id = p_eval_run_id
+  for update;
+  if not found then
+    raise exception 'EVAL_RUN_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if target_run.status in ('finalized', 'cancelled') then
+    raise exception 'BROWSER_CONTEXT_RUN_TERMINAL' using errcode = '55000';
+  end if;
+
+  select lease.* into existing_lease
+  from public.browser_context_leases lease
+  where lease.eval_run_id = p_eval_run_id
+  for update;
+  if found then
+    if existing_lease.context_id <> p_context_id then
+      raise exception 'BROWSER_CONTEXT_LEASE_CONFLICT' using errcode = '23505';
+    end if;
+    return query select lease.* from public.browser_context_leases lease where lease.id = existing_lease.id;
+    return;
+  end if;
+
+  return query
+  insert into public.browser_context_leases (
+    agency_id,
+    eval_run_id,
+    context_id,
+    context_id_hash,
+    delete_after,
+    next_cleanup_at
+  ) values (
+    target_run.agency_id,
+    target_run.id,
+    p_context_id,
+    encode(digest(p_context_id, 'sha256'), 'hex'),
+    p_delete_after,
+    p_delete_after
+  )
+  returning *;
+end;
+$$;
+
+drop function if exists public.claim_browser_context_session(uuid,text,uuid,integer);
+create or replace function public.claim_browser_context_session(
+  p_eval_run_id uuid,
+  p_context_id text,
+  p_owner_token uuid,
+  p_lease_seconds integer
+)
+returns table(
+  may_execute boolean,
+  retry_after_at timestamptz,
+  lease_expires_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  saved public.browser_context_leases%rowtype;
+begin
+  if p_owner_token is null or p_lease_seconds not between 30 and 3600 then
+    raise exception 'BROWSER_CONTEXT_SESSION_CLAIM_INVALID' using errcode = '22023';
+  end if;
+
+  select lease.* into saved
+  from public.browser_context_leases lease
+  where lease.eval_run_id = p_eval_run_id
+  for update;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_LEASE_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if saved.context_id <> p_context_id then
+    raise exception 'BROWSER_CONTEXT_LEASE_MISMATCH' using errcode = '42501';
+  end if;
+
+  if saved.cleanup_status = 'active' and saved.delete_after <= now() then
+    update public.browser_context_leases lease set
+      cleanup_status = 'pending',
+      cleanup_requested_at = now(),
+      cleanup_reason_code = 'LEASE_EXPIRED',
+      next_cleanup_at = greatest(now(), coalesce(lease.sync_ready_at, now())),
+      updated_at = now()
+    where lease.id = saved.id
+    returning lease.* into saved;
+    return query select false, saved.next_cleanup_at, null::timestamptz;
+    return;
+  end if;
+
+  if saved.cleanup_status <> 'active' then
+    return query select false, saved.next_cleanup_at, null::timestamptz;
+    return;
+  end if;
+  if saved.sync_ready_at is not null and saved.sync_ready_at > now() then
+    return query select false, saved.sync_ready_at, null::timestamptz;
+    return;
+  end if;
+
+  if saved.session_owner_token is null
+    or saved.session_lease_expires_at <= now()
+    or saved.session_owner_token = p_owner_token then
+    update public.browser_context_leases lease set
+      session_owner_token = p_owner_token,
+      session_lease_expires_at = now() + make_interval(secs => p_lease_seconds),
+      updated_at = now()
+    where lease.id = saved.id
+    returning lease.* into saved;
+    return query select true, null::timestamptz, saved.session_lease_expires_at;
+    return;
+  end if;
+
+  return query select false, least(saved.session_lease_expires_at, saved.delete_after), null::timestamptz;
+end;
+$$;
+
+drop function if exists public.record_browser_context_session_started(uuid,text,uuid,text);
+create or replace function public.record_browser_context_session_started(
+  p_eval_run_id uuid,
+  p_context_id text,
+  p_owner_token uuid,
+  p_last_session_id text
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_last_session_id is null
+    or length(p_last_session_id) not between 8 and 255
+    or p_last_session_id ~ '[[:space:][:cntrl:]]' then
+    raise exception 'BROWSER_CONTEXT_SESSION_ID_INVALID' using errcode = '22023';
+  end if;
+
+  return query
+  update public.browser_context_leases lease set
+    last_session_id = p_last_session_id,
+    updated_at = now()
+  where lease.eval_run_id = p_eval_run_id
+    and lease.context_id = p_context_id
+    and lease.session_owner_token = p_owner_token
+    and lease.session_lease_expires_at > now()
+    and lease.cleanup_status in ('active', 'pending')
+  returning lease.*;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_SESSION_CLAIM_LOST' using errcode = '40001';
+  end if;
+end;
+$$;
+
+drop function if exists public.complete_browser_context_session(uuid,text,uuid,text,text,timestamptz);
+create or replace function public.complete_browser_context_session(
+  p_eval_run_id uuid,
+  p_context_id text,
+  p_owner_token uuid,
+  p_last_session_id text,
+  p_resume_url text,
+  p_sync_ready_at timestamptz
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_last_session_id is null
+    or (
+      p_last_session_id <> '' and (
+        length(p_last_session_id) not between 8 and 255
+        or p_last_session_id ~ '[[:space:][:cntrl:]]'
+      )
+    )
+    or p_resume_url is null
+    or length(p_resume_url) > 2048
+    or p_resume_url <> trim(p_resume_url)
+    or (
+      p_resume_url <> '' and (
+        p_resume_url !~ '^https://'
+        or p_resume_url ~ '[?#[:space:][:cntrl:]]'
+        or p_resume_url ~ '^https://[^/]*@'
+      )
+    )
+    or p_sync_ready_at is null
+    or p_sync_ready_at < now() - interval '5 minutes'
+    or p_sync_ready_at > now() + interval '10 minutes' then
+    raise exception 'BROWSER_CONTEXT_SESSION_COMPLETION_INVALID' using errcode = '22023';
+  end if;
+
+  return query
+  update public.browser_context_leases lease set
+    last_session_id = coalesce(nullif(p_last_session_id, ''), lease.last_session_id),
+    resume_url = p_resume_url,
+    sync_ready_at = p_sync_ready_at,
+    session_owner_token = null,
+    session_lease_expires_at = null,
+    next_cleanup_at = case
+      when lease.cleanup_status = 'pending'
+        then greatest(coalesce(lease.next_cleanup_at, p_sync_ready_at), p_sync_ready_at)
+      else lease.next_cleanup_at
+    end,
+    updated_at = now()
+  where lease.eval_run_id = p_eval_run_id
+    and lease.context_id = p_context_id
+    and lease.session_owner_token = p_owner_token
+    and lease.cleanup_status in ('active', 'pending')
+  returning lease.*;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_SESSION_CLAIM_LOST' using errcode = '40001';
+  end if;
+end;
+$$;
+
+drop function if exists public.mark_browser_context_released(uuid,text,text);
+create or replace function public.mark_browser_context_released(
+  p_eval_run_id uuid,
+  p_context_id text,
+  p_reason_code text default 'RUN_TERMINAL'
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  saved public.browser_context_leases%rowtype;
+begin
+  if p_reason_code is null or p_reason_code !~ '^[A-Z0-9_]{3,64}$' then
+    raise exception 'BROWSER_CONTEXT_RELEASE_REASON_INVALID' using errcode = '22023';
+  end if;
+
+  select lease.* into saved
+  from public.browser_context_leases lease
+  where lease.eval_run_id = p_eval_run_id
+  for update;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_LEASE_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if saved.context_id <> p_context_id then
+    raise exception 'BROWSER_CONTEXT_LEASE_MISMATCH' using errcode = '42501';
+  end if;
+
+  if saved.cleanup_status = 'deleted' then
+    return query select lease.* from public.browser_context_leases lease where lease.id = saved.id;
+    return;
+  end if;
+  if saved.cleanup_status not in ('active', 'pending')
+    or (saved.session_lease_expires_at is not null and saved.session_lease_expires_at > now()) then
+    raise exception 'BROWSER_CONTEXT_RELEASE_NOT_SAFE' using errcode = '55000';
+  end if;
+
+  update public.browser_context_leases lease set
+    cleanup_status = 'deleted',
+    cleanup_requested_at = coalesce(lease.cleanup_requested_at, now()),
+    cleanup_reason_code = case when lease.cleanup_reason_code = '' then p_reason_code else lease.cleanup_reason_code end,
+    cleanup_worker_id = '',
+    cleanup_lease_expires_at = null,
+    next_cleanup_at = null,
+    last_cleanup_error_code = '',
+    resume_url = '',
+    session_owner_token = null,
+    session_lease_expires_at = null,
+    released_at = now(),
+    updated_at = now()
+  where lease.id = saved.id
+  returning lease.* into saved;
+  return query select lease.* from public.browser_context_leases lease where lease.id = saved.id;
+end;
+$$;
+
+drop function if exists public.claim_browser_context_cleanup_batch(integer,text,integer);
+create or replace function public.claim_browser_context_cleanup_batch(
+  p_limit integer,
+  p_worker_id text,
+  p_lease_seconds integer
+)
+returns table(
+  lease_id uuid,
+  agency_id uuid,
+  eval_run_id uuid,
+  context_id text,
+  last_session_id text,
+  cleanup_attempt integer
+)
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_limit not between 1 and 20
+    or p_worker_id is null
+    or p_worker_id !~ '^[A-Za-z0-9:_-]{8,128}$'
+    or p_lease_seconds not between 30 and 900 then
+    raise exception 'BROWSER_CONTEXT_CLEANUP_CLAIM_INVALID' using errcode = '22023';
+  end if;
+
+  return query
+  with due as (
+    select lease.id
+    from public.browser_context_leases lease
+    where lease.cleanup_status in ('active', 'pending', 'claimed', 'failed')
+      and lease.next_cleanup_at <= now()
+      and (lease.session_lease_expires_at is null or lease.session_lease_expires_at <= now())
+      and (lease.sync_ready_at is null or lease.sync_ready_at <= now())
+    order by lease.next_cleanup_at, lease.id
+    limit p_limit
+    for update skip locked
+  ), claimed as (
+    update public.browser_context_leases lease set
+      cleanup_status = 'claimed',
+      cleanup_requested_at = coalesce(lease.cleanup_requested_at, now()),
+      cleanup_reason_code = case
+        when lease.cleanup_reason_code = '' then 'LEASE_EXPIRED'
+        else lease.cleanup_reason_code
+      end,
+      cleanup_attempts = lease.cleanup_attempts + 1,
+      cleanup_worker_id = p_worker_id,
+      cleanup_lease_expires_at = now() + make_interval(secs => p_lease_seconds),
+      next_cleanup_at = now() + make_interval(secs => p_lease_seconds),
+      last_cleanup_error_code = '',
+      session_owner_token = null,
+      session_lease_expires_at = null,
+      updated_at = now()
+    from due
+    where lease.id = due.id
+    returning lease.*
+  )
+  select claimed.id, claimed.agency_id, claimed.eval_run_id, claimed.context_id,
+    claimed.last_session_id, claimed.cleanup_attempts
+  from claimed
+  order by claimed.next_cleanup_at, claimed.id;
+end;
+$$;
+
+drop function if exists public.complete_browser_context_cleanup(uuid,text);
+create or replace function public.complete_browser_context_cleanup(
+  p_lease_id uuid,
+  p_worker_id text
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  return query
+  update public.browser_context_leases lease set
+    cleanup_status = 'deleted',
+    cleanup_worker_id = '',
+    cleanup_lease_expires_at = null,
+    next_cleanup_at = null,
+    last_cleanup_error_code = '',
+    resume_url = '',
+    session_owner_token = null,
+    session_lease_expires_at = null,
+    released_at = now(),
+    updated_at = now()
+  where lease.id = p_lease_id
+    and lease.cleanup_status = 'claimed'
+    and lease.cleanup_worker_id = p_worker_id
+  returning lease.*;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_CLEANUP_CLAIM_LOST' using errcode = '40001';
+  end if;
+end;
+$$;
+
+drop function if exists public.retry_browser_context_cleanup(uuid,text,text,integer);
+create or replace function public.retry_browser_context_cleanup(
+  p_lease_id uuid,
+  p_worker_id text,
+  p_error_code text,
+  p_retry_after_seconds integer
+)
+returns setof public.browser_context_leases
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if p_error_code is null
+    or p_error_code !~ '^[A-Z0-9_]{3,64}$'
+    or p_retry_after_seconds not between 30 and 21600 then
+    raise exception 'BROWSER_CONTEXT_CLEANUP_RETRY_INVALID' using errcode = '22023';
+  end if;
+
+  return query
+  update public.browser_context_leases lease set
+    cleanup_status = 'failed',
+    cleanup_worker_id = '',
+    cleanup_lease_expires_at = null,
+    next_cleanup_at = now() + make_interval(secs => p_retry_after_seconds),
+    last_cleanup_error_code = p_error_code,
+    session_owner_token = null,
+    session_lease_expires_at = null,
+    updated_at = now()
+  where lease.id = p_lease_id
+    and lease.cleanup_status = 'claimed'
+    and lease.cleanup_worker_id = p_worker_id
+  returning lease.*;
+  if not found then
+    raise exception 'BROWSER_CONTEXT_CLEANUP_CLAIM_LOST' using errcode = '40001';
+  end if;
+end;
+$$;
+
 alter table public.project_authorizations enable row level security;
 alter table public.journey_versions enable row level security;
 alter table public.journey_stage_definitions enable row level security;
 alter table public.journey_schedules enable row level security;
 alter table public.eval_runs enable row level security;
+alter table public.browser_context_leases enable row level security;
 alter table public.eval_run_side_effect_attempts enable row level security;
 alter table public.eval_rate_limit_buckets enable row level security;
 alter table public.ai_assistance_requests enable row level security;
@@ -4881,6 +5576,9 @@ revoke all on table public.ai_assistance_requests from public, anon, authenticat
 grant select, insert, update, delete on public.ai_assistance_requests to service_role;
 revoke all on table public.provider_webhook_receipts from public, anon, authenticated;
 grant select, insert, update, delete on public.provider_webhook_receipts to service_role;
+revoke all on table public.browser_context_leases from public, anon, authenticated;
+revoke insert, update, delete on table public.browser_context_leases from service_role;
+grant select on table public.browser_context_leases to service_role;
 drop policy if exists inbound_email_events_members_select on public.inbound_email_events;
 revoke all on table public.inbound_email_events from public, anon, authenticated;
 grant select, insert, update, delete on public.inbound_email_events to service_role;
@@ -5029,6 +5727,8 @@ revoke all on function public.update_business_eval_workspace_member_role(uuid,uu
 grant execute on function public.update_business_eval_workspace_member_role(uuid,uuid,uuid,text) to service_role;
 revoke all on function public.remove_business_eval_workspace_member(uuid,uuid,uuid) from public, anon, authenticated;
 grant execute on function public.remove_business_eval_workspace_member(uuid,uuid,uuid) to service_role;
+revoke all on function public.record_business_eval_incident_repair(uuid,uuid,uuid,timestamptz,text) from public, anon, authenticated;
+grant execute on function public.record_business_eval_incident_repair(uuid,uuid,uuid,timestamptz,text) to service_role;
 
 revoke all on function public.create_business_eval_project(uuid,integer,uuid,text,text,text,text,uuid,text,text) from public, anon, authenticated;
 grant execute on function public.create_business_eval_project(uuid,integer,uuid,text,text,text,text,uuid,text,text) to service_role;
@@ -5104,6 +5804,331 @@ revoke all on function public.claim_provider_webhook_receipt(text,text,text,text
 grant execute on function public.claim_provider_webhook_receipt(text,text,text,text,integer) to service_role;
 revoke all on function public.finish_provider_webhook_receipt(uuid,uuid,text,boolean,text) from public, anon, authenticated;
 grant execute on function public.finish_provider_webhook_receipt(uuid,uuid,text,boolean,text) to service_role;
+revoke all on function public.register_browser_context_lease(uuid,text,timestamptz) from public, anon, authenticated;
+grant execute on function public.register_browser_context_lease(uuid,text,timestamptz) to service_role;
+revoke all on function public.claim_browser_context_session(uuid,text,uuid,integer) from public, anon, authenticated;
+grant execute on function public.claim_browser_context_session(uuid,text,uuid,integer) to service_role;
+revoke all on function public.record_browser_context_session_started(uuid,text,uuid,text) from public, anon, authenticated;
+grant execute on function public.record_browser_context_session_started(uuid,text,uuid,text) to service_role;
+revoke all on function public.complete_browser_context_session(uuid,text,uuid,text,text,timestamptz) from public, anon, authenticated;
+grant execute on function public.complete_browser_context_session(uuid,text,uuid,text,text,timestamptz) to service_role;
+revoke all on function public.mark_browser_context_released(uuid,text,text) from public, anon, authenticated;
+grant execute on function public.mark_browser_context_released(uuid,text,text) to service_role;
+revoke all on function public.claim_browser_context_cleanup_batch(integer,text,integer) from public, anon, authenticated;
+grant execute on function public.claim_browser_context_cleanup_batch(integer,text,integer) to service_role;
+revoke all on function public.complete_browser_context_cleanup(uuid,text) from public, anon, authenticated;
+grant execute on function public.complete_browser_context_cleanup(uuid,text) to service_role;
+revoke all on function public.retry_browser_context_cleanup(uuid,text,text,integer) from public, anon, authenticated;
+grant execute on function public.retry_browser_context_cleanup(uuid,text,text,integer) to service_role;
+
+-- A Checkout Session is a side-effecting subscription mutation. Keep one
+-- durable reservation per workspace so browser retries, cross-tab requests,
+-- and server restarts all converge on the same Stripe idempotency generation.
+create table if not exists public.stripe_checkout_sessions (
+  id uuid primary key default gen_random_uuid(),
+  agency_id uuid not null references public.agencies(id) on delete cascade,
+  requested_by_user_id uuid references public.profiles(id) on delete set null,
+  plan_id text not null,
+  billing_interval text not null,
+  billing_origin text not null,
+  customer_id text not null default '',
+  customer_email text not null default '',
+  idempotency_key_hash text not null,
+  provider_idempotency_key text not null,
+  stripe_session_id text,
+  checkout_url text,
+  status text not null default 'creating',
+  provider_expires_at timestamptz not null,
+  expires_at timestamptz not null,
+  completed_at timestamptz,
+  created_at timestamptz not null default clock_timestamp(),
+  updated_at timestamptz not null default clock_timestamp(),
+  constraint stripe_checkout_sessions_plan_valid check (plan_id in ('starter', 'growth', 'scale')),
+  constraint stripe_checkout_sessions_interval_valid check (billing_interval in ('monthly', 'annual')),
+  constraint stripe_checkout_sessions_origin_valid check (
+    billing_origin ~ '^https://[^/?#[:space:]]+$'
+    or billing_origin ~ '^http://(?:localhost|127[.]0[.]0[.]1)(?::[0-9]{1,5})?$'
+  ),
+  constraint stripe_checkout_sessions_customer_id_safe check (
+    length(customer_id) <= 255 and customer_id !~ '[[:space:]]'
+  ),
+  constraint stripe_checkout_sessions_customer_email_safe check (
+    length(customer_email) <= 320 and customer_email !~ '[\r\n]'
+  ),
+  constraint stripe_checkout_sessions_request_hash_valid check (idempotency_key_hash ~ '^[a-f0-9]{64}$'),
+  constraint stripe_checkout_sessions_provider_key_valid check (
+    provider_idempotency_key ~ '^maintainflow-checkout-[a-f0-9]{64}$'
+  ),
+  constraint stripe_checkout_sessions_provider_id_safe check (
+    stripe_session_id is null
+    or (length(stripe_session_id) between 8 and 255 and stripe_session_id !~ '[[:space:]]')
+  ),
+  constraint stripe_checkout_sessions_url_safe check (
+    checkout_url is null or checkout_url ~ '^https://checkout[.]stripe[.]com/'
+  ),
+  constraint stripe_checkout_sessions_status_valid check (
+    status in ('creating', 'open', 'complete', 'expired', 'failed')
+  ),
+  constraint stripe_checkout_sessions_expiry_valid check (
+    provider_expires_at > created_at and expires_at >= provider_expires_at + interval '60 seconds'
+  ),
+  constraint stripe_checkout_sessions_completion_valid check (
+    (status = 'complete' and completed_at is not null)
+    or (status <> 'complete' and completed_at is null)
+  ),
+  constraint stripe_checkout_sessions_agency_request_unique unique (agency_id, idempotency_key_hash),
+  constraint stripe_checkout_sessions_provider_key_unique unique (provider_idempotency_key),
+  constraint stripe_checkout_sessions_provider_id_unique unique (stripe_session_id)
+);
+
+comment on table public.stripe_checkout_sessions is
+  'Private, workspace-wide Stripe Checkout reservation ledger. Browser idempotency keys are retained only as SHA-256 hashes.';
+comment on column public.stripe_checkout_sessions.expires_at is
+  'Reservation recovery deadline. It intentionally remains later than Stripe provider_expires_at.';
+
+create index if not exists stripe_checkout_sessions_agency_created_idx
+  on public.stripe_checkout_sessions (agency_id, created_at desc);
+create unique index if not exists stripe_checkout_sessions_one_active_per_agency_uidx
+  on public.stripe_checkout_sessions (agency_id)
+  where status in ('creating', 'open');
+
+create or replace function public.reserve_stripe_checkout_session(
+  p_agency_id uuid,
+  p_user_id uuid,
+  p_plan_id text,
+  p_billing_interval text,
+  p_billing_origin text,
+  p_customer_id text,
+  p_customer_email text,
+  p_idempotency_key_hash text,
+  p_lifetime_seconds integer
+)
+returns setof public.stripe_checkout_sessions
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  workspace public.agencies%rowtype;
+  saved public.stripe_checkout_sessions%rowtype;
+  reservation_id uuid;
+  reservation_time timestamptz := clock_timestamp();
+  normalized_origin text := btrim(coalesce(p_billing_origin, ''));
+  normalized_customer_id text := btrim(coalesce(p_customer_id, ''));
+  normalized_customer_email text := lower(btrim(coalesce(p_customer_email, '')));
+begin
+  if p_plan_id not in ('starter', 'growth', 'scale')
+    or p_billing_interval not in ('monthly', 'annual') then
+    raise exception 'STRIPE_CHECKOUT_SELECTION_INVALID' using errcode = '22023';
+  end if;
+  if normalized_origin !~ '^https://[^/?#[:space:]]+$'
+    and normalized_origin !~ '^http://(?:localhost|127[.]0[.]0[.]1)(?::[0-9]{1,5})?$' then
+    raise exception 'STRIPE_CHECKOUT_ORIGIN_INVALID' using errcode = '22023';
+  end if;
+  if length(normalized_customer_id) > 255 or normalized_customer_id ~ '[[:space:]]'
+    or length(normalized_customer_email) > 320 or normalized_customer_email ~ '[\r\n]' then
+    raise exception 'STRIPE_CHECKOUT_CUSTOMER_INVALID' using errcode = '22023';
+  end if;
+  if p_idempotency_key_hash is null or p_idempotency_key_hash !~ '^[a-f0-9]{64}$' then
+    raise exception 'STRIPE_CHECKOUT_IDEMPOTENCY_INVALID' using errcode = '22023';
+  end if;
+  if p_lifetime_seconds not between 2100 and 86400 then
+    raise exception 'STRIPE_CHECKOUT_LIFETIME_INVALID' using errcode = '22023';
+  end if;
+
+  select * into workspace from public.agencies where id = p_agency_id for update;
+  if not found then
+    raise exception 'WORKSPACE_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if not exists (
+    select 1 from public.memberships
+    where agency_id = p_agency_id and user_id = p_user_id and role in ('owner', 'admin')
+  ) then
+    raise exception 'BILLING_ADMIN_REQUIRED' using errcode = '42501';
+  end if;
+
+  update public.stripe_checkout_sessions reservation set
+    status = 'expired',
+    checkout_url = null,
+    updated_at = reservation_time
+  where reservation.agency_id = p_agency_id
+    and reservation.status in ('creating', 'open')
+    and reservation.expires_at <= reservation_time;
+
+  select * into saved
+  from public.stripe_checkout_sessions reservation
+  where reservation.agency_id = p_agency_id
+    and reservation.idempotency_key_hash = p_idempotency_key_hash;
+  if found then
+    if saved.plan_id <> p_plan_id or saved.billing_interval <> p_billing_interval then
+      raise exception 'STRIPE_CHECKOUT_IDEMPOTENCY_REUSED' using errcode = '23505';
+    end if;
+    return query select * from public.stripe_checkout_sessions where id = saved.id;
+    return;
+  end if;
+
+  if workspace.stripe_subscription_id is not null
+    and coalesce(workspace.stripe_subscription_status, '') not in ('canceled', 'incomplete_expired') then
+    raise exception 'STRIPE_SUBSCRIPTION_ALREADY_LINKED' using errcode = '23505';
+  end if;
+
+  select * into saved
+  from public.stripe_checkout_sessions reservation
+  where reservation.agency_id = p_agency_id
+    and reservation.status in ('creating', 'open')
+  for update;
+  if found then
+    return query select * from public.stripe_checkout_sessions where id = saved.id;
+    return;
+  end if;
+
+  reservation_id := gen_random_uuid();
+  insert into public.stripe_checkout_sessions (
+    id, agency_id, requested_by_user_id, plan_id, billing_interval, billing_origin,
+    customer_id, customer_email, idempotency_key_hash, provider_idempotency_key,
+    provider_expires_at, expires_at, created_at, updated_at
+  ) values (
+    reservation_id, p_agency_id, p_user_id, p_plan_id, p_billing_interval, normalized_origin,
+    normalized_customer_id, normalized_customer_email, p_idempotency_key_hash,
+    'maintainflow-checkout-'
+      || encode(digest('stripe-checkout:' || reservation_id::text, 'sha256'), 'hex'),
+    reservation_time + make_interval(secs => p_lifetime_seconds),
+    reservation_time + make_interval(secs => p_lifetime_seconds + 300),
+    reservation_time, reservation_time
+  ) returning * into saved;
+
+  return query select * from public.stripe_checkout_sessions where id = saved.id;
+end;
+$$;
+
+create or replace function public.record_stripe_checkout_session(
+  p_agency_id uuid,
+  p_reservation_id uuid,
+  p_stripe_session_id text,
+  p_checkout_url text,
+  p_provider_expires_at timestamptz
+)
+returns setof public.stripe_checkout_sessions
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  saved public.stripe_checkout_sessions%rowtype;
+begin
+  if p_stripe_session_id is null
+    or length(p_stripe_session_id) not between 8 and 255
+    or p_stripe_session_id ~ '[[:space:]]'
+    or p_checkout_url is null
+    or p_checkout_url !~ '^https://checkout[.]stripe[.]com/' then
+    raise exception 'STRIPE_CHECKOUT_PROVIDER_RESPONSE_INVALID' using errcode = '22023';
+  end if;
+
+  select * into saved from public.stripe_checkout_sessions
+  where id = p_reservation_id and agency_id = p_agency_id for update;
+  if not found then
+    raise exception 'STRIPE_CHECKOUT_RESERVATION_NOT_FOUND' using errcode = 'P0002';
+  end if;
+  if saved.status not in ('creating', 'open') then
+    raise exception 'STRIPE_CHECKOUT_RESERVATION_TERMINAL' using errcode = '23514';
+  end if;
+  if saved.stripe_session_id is not null and saved.stripe_session_id <> p_stripe_session_id then
+    raise exception 'STRIPE_CHECKOUT_PROVIDER_ID_MISMATCH' using errcode = '23505';
+  end if;
+  if abs(extract(epoch from (saved.provider_expires_at - p_provider_expires_at))) > 5 then
+    raise exception 'STRIPE_CHECKOUT_PROVIDER_EXPIRY_MISMATCH' using errcode = '23514';
+  end if;
+
+  update public.stripe_checkout_sessions reservation set
+    stripe_session_id = p_stripe_session_id,
+    checkout_url = p_checkout_url,
+    status = 'open',
+    updated_at = clock_timestamp()
+  where reservation.id = saved.id;
+  return query select * from public.stripe_checkout_sessions where id = saved.id;
+end;
+$$;
+
+create or replace function public.get_stripe_checkout_session_for_return(
+  p_agency_id uuid,
+  p_user_id uuid,
+  p_stripe_session_id text
+)
+returns setof public.stripe_checkout_sessions
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not exists (
+    select 1 from public.memberships
+    where agency_id = p_agency_id and user_id = p_user_id and role in ('owner', 'admin')
+  ) then
+    raise exception 'BILLING_ADMIN_REQUIRED' using errcode = '42501';
+  end if;
+  return query
+    select * from public.stripe_checkout_sessions reservation
+    where reservation.agency_id = p_agency_id
+      and reservation.stripe_session_id = p_stripe_session_id;
+end;
+$$;
+
+create or replace function public.finish_stripe_checkout_session(
+  p_agency_id uuid,
+  p_stripe_session_id text,
+  p_status text
+)
+returns setof public.stripe_checkout_sessions
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  saved public.stripe_checkout_sessions%rowtype;
+  finished_at timestamptz := clock_timestamp();
+begin
+  if p_status not in ('complete', 'expired', 'failed') then
+    raise exception 'STRIPE_CHECKOUT_TERMINAL_STATUS_INVALID' using errcode = '22023';
+  end if;
+  select * into saved from public.stripe_checkout_sessions
+  where agency_id = p_agency_id and stripe_session_id = p_stripe_session_id for update;
+  if not found then return; end if;
+
+  -- Never let an older expiry observation overwrite confirmed completion.
+  if saved.status = 'complete' and p_status <> 'complete' then
+    return query select * from public.stripe_checkout_sessions where id = saved.id;
+    return;
+  end if;
+
+  update public.stripe_checkout_sessions reservation set
+    status = p_status,
+    checkout_url = null,
+    completed_at = case when p_status = 'complete' then coalesce(reservation.completed_at, finished_at) else null end,
+    updated_at = finished_at
+  where reservation.id = saved.id;
+  return query select * from public.stripe_checkout_sessions where id = saved.id;
+end;
+$$;
+
+alter table public.stripe_checkout_sessions enable row level security;
+revoke all on table public.stripe_checkout_sessions from public, anon, authenticated, service_role;
+grant select on table public.stripe_checkout_sessions to service_role;
+revoke all on function public.reserve_stripe_checkout_session(uuid,uuid,text,text,text,text,text,text,integer)
+  from public, anon, authenticated;
+grant execute on function public.reserve_stripe_checkout_session(uuid,uuid,text,text,text,text,text,text,integer)
+  to service_role;
+revoke all on function public.record_stripe_checkout_session(uuid,uuid,text,text,timestamptz)
+  from public, anon, authenticated;
+grant execute on function public.record_stripe_checkout_session(uuid,uuid,text,text,timestamptz)
+  to service_role;
+revoke all on function public.get_stripe_checkout_session_for_return(uuid,uuid,text)
+  from public, anon, authenticated;
+grant execute on function public.get_stripe_checkout_session_for_return(uuid,uuid,text)
+  to service_role;
+revoke all on function public.finish_stripe_checkout_session(uuid,text,text)
+  from public, anon, authenticated;
+grant execute on function public.finish_stripe_checkout_session(uuid,text,text)
+  to service_role;
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (

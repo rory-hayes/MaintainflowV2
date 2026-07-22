@@ -33,13 +33,17 @@ test("scheduler SQL claims checks with skip locked and calls the protected cron 
   assert.match(sql, /cron\.schedule\(\s*'maintainflow-run-checks'/)
   assert.match(sql, /cron\.schedule\(\s*'maintainflow-run-checks-2'/)
   assert.match(sql, /schedule text default '\* \* \* \* \*'/)
-  assert.equal((sql.match(/timeout_milliseconds := 60000/g) ?? []).length, 7)
+  assert.equal((sql.match(/timeout_milliseconds := 60000/g) ?? []).length, 9)
   assert.equal((sql.match(/'batchSize', 5/g) ?? []).length, 5)
+  assert.equal((sql.match(/'batchSize', 4/g) ?? []).length, 2)
   assert.equal((sql.match(/'batchSize', 10/g) ?? []).length, 2)
   assert.match(sql, /configure_maintainflow_scheduler_direct/)
   assert.match(sql, /\/api\/cron\/run-checks/)
   assert.match(sql, /cron\.schedule\(\s*'maintainflow-run-evals'/)
   assert.match(sql, /\/api\/cron\/run-evals/)
+  assert.match(sql, /cron\.schedule\(\s*'maintainflow-cleanup-browser-contexts'/)
+  assert.match(sql, /\/api\/cron\/cleanup-browser-contexts/)
+  assert.equal((sql.match(/cron\.schedule\(\s*'maintainflow-cleanup-browser-contexts'/g) ?? []).length, 2)
   assert.match(sql, /cron\.schedule\(\s*'maintainflow-deliver-eval-alerts'/)
   assert.match(sql, /\/api\/cron\/deliver-eval-alerts/)
   assert.match(sql, /Authorization/)
@@ -97,6 +101,9 @@ test("scheduler verification SQL is read-only and checks the cron installation",
   assert.match(sql, /maintainflow-run-checks-2/)
   assert.match(sql, /timeout_milliseconds\\s\*:=\\s\*60000/)
   assert.match(sql, /'''batchSize''\\s\*,\\s\*5/)
+  assert.match(sql, /browser_context_cleanup_scheduler_ready/)
+  assert.match(sql, /'''batchSize''\\s\*,\\s\*4/)
+  assert.match(sql, /\/api\/cron\/cleanup-browser-contexts/)
   assert.match(sql, /retired_paid_pilot_retry_job_absent/)
   assert.doesNotMatch(sql, /select\s+public\.claim_due_checks\(/i)
   assert.doesNotMatch(sql, /net\.http_post\(/)
@@ -117,6 +124,18 @@ test("cron route handler rejects unauthenticated requests before running checks"
   assert.equal(response.status, 401)
   assert.equal(response.body.ok, false)
   assert.equal(runnerCalled, false)
+})
+
+test("cron adapters authenticate before materializing request JSON", () => {
+  for (const path of [
+    "src/app/api/cron/run-checks/route.ts",
+    "src/app/api/cron/run-evals/route.ts",
+  ]) {
+    const route = readFileSync(path, "utf8")
+    const authIndex = route.indexOf("isAuthorizedCronRequest(")
+    const bodyIndex = route.indexOf("await readOptionalBoundedJson(request")
+    assert.ok(authIndex >= 0 && bodyIndex > authIndex, path + " must authenticate before parsing JSON")
+  }
 })
 
 test("cron route handler caps each launch worker to one concurrent five-check wave", async () => {
@@ -163,6 +182,36 @@ test("contract capacity migration activates five-check waves after artifact proo
   assert.match(sql, /cron\.schedule\(\s*'maintainflow-run-checks-2'/)
   assert.equal((sql.match(/'\* \* \* \* \*'/g) ?? []).length, 2)
   assert.doesNotMatch(sql, /replace-with|cron_secret|Authorization/)
+})
+
+test("cleanup scheduler migration preserves installed eval credentials and the eval job", () => {
+  const sql = readFileSync(
+    new URL("../supabase/maintainflow_browser_context_cleanup_scheduler_migration.sql", import.meta.url),
+    "utf8",
+  )
+
+  assert.match(sql, /select command[\s\S]+where jobname = 'maintainflow-run-evals'/)
+  assert.match(sql, /replace\([\s\S]+\/api\/cron\/run-evals[\s\S]+\/api\/cron\/cleanup-browser-contexts/)
+  assert.match(sql, /timeout_milliseconds := 60000/)
+  assert.match(sql, /'''batchSize'', 4/)
+  assert.match(sql, /cron\.schedule\(\s*'maintainflow-cleanup-browser-contexts'/)
+  assert.doesNotMatch(sql, /cron\.unschedule\('maintainflow-run-evals'\)/)
+  assert.doesNotMatch(sql, /delete\s+from|truncate\s+|drop\s+table|alter\s+table/i)
+})
+
+test("cron smoke keeps legacy scheduling and exercises the dedicated cleanup route", () => {
+  const source = readFileSync(new URL("../scripts/smoke-cron.mjs", import.meta.url), "utf8")
+
+  assert.match(source, /\/api\/cron\/run-checks/)
+  assert.match(source, /\/api\/cron\/cleanup-browser-contexts/)
+  assert.match(source, /BROWSER_CONTEXT_CLEANUP_BATCH_SIZE/)
+  assert.match(source, /boundedInteger\([\s\S]+1,[\s\S]+4/)
+  assert.match(source, /Expected unauthenticated \$\{target\.name\} request to return 401/)
+  assert.match(source, /Authorized \$\{target\.name\} request succeeded/)
+  assert.match(source, /assertSafeCleanupSummary/)
+  assert.match(source, /non-aggregate detail/)
+  assert.match(source, /validateCredentialBearingAppOrigin/)
+  assert.match(source, /allowLocal: true/)
 })
 
 test("cron route handler preserves a lease buffer beyond endpoint and persistence time", async () => {

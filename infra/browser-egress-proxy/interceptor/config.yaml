@@ -1,0 +1,26 @@
+# Production values are passed by the launch wrapper and then verified by the
+# addon. This file intentionally contains no credential, certificate, hostname,
+# project ID, or production endpoint.
+ssl_insecure: false
+ssl_verify_upstream_trusted_confdir: null
+upstream_cert: true
+tls_version_server_min: TLS1_2
+http_connect_send_host_header: true
+upstream_auth: null
+rawtcp: false
+websocket: false
+http2: true
+http3: false
+connection_strategy: lazy
+body_size_limit: 20m
+stream_large_bodies: 1
+store_streamed_bodies: false
+validate_inbound_headers: true
+tcp_timeout: 30
+flow_detail: 0
+termlog_verbosity: error
+showhost: false
+block_global: false
+ignore_hosts: []
+tcp_hosts: []
+udp_hosts: []

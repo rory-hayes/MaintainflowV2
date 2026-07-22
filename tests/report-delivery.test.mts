@@ -61,6 +61,8 @@ test("live assurance smoke proves verification truth and private snapshot PDF de
   assert.doesNotMatch(source, /legacyRowsForMissing|V1\.5/)
   assert.doesNotMatch(source, /\/email/)
   assert.doesNotMatch(source, /Resend/)
+  assert.match(source, /validateCredentialBearingAppOrigin\(env\.SMOKE_APP_URL \|\| env\.NEXT_PUBLIC_APP_URL/)
+  assert.doesNotMatch(source, /Authorization: `Bearer \$\{key\}`/)
 })
 
 function reportViewModel(): ReportViewModel {

@@ -1,8 +1,22 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import test from "node:test"
 
 const read = (path: string) => readFileSync(path, "utf8")
+
+test("the retired endpoint-monitoring landing component is removed", () => {
+  for (const path of [
+    "src/components/marketing/seo-landing-page.tsx",
+    "src/sections/capabilities.tsx",
+    "src/sections/cta.tsx",
+    "src/sections/features.tsx",
+    "src/sections/hero.tsx",
+    "src/sections/traction-stats.tsx",
+    "src/sections/use-cases.tsx",
+  ]) {
+    assert.equal(existsSync(path), false, `${path} must not restore the retired endpoint-monitoring offer`)
+  }
+})
 
 test("the sitemap contains only the canonical Business Evals public surface", () => {
   const source = read("src/app/sitemap.ts")

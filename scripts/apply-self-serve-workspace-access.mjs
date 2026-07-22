@@ -56,6 +56,22 @@ const businessEvalsMigration = await readFile(
   new URL("../supabase/maintainflow_business_evals_migration.sql", import.meta.url),
   "utf8"
 )
+const legalAcceptancesMigration = await readFile(
+  new URL("../supabase/maintainflow_legal_acceptances_migration.sql", import.meta.url),
+  "utf8"
+)
+const browserContextLeasesMigration = await readFile(
+  new URL("../supabase/maintainflow_browser_context_leases_migration.sql", import.meta.url),
+  "utf8"
+)
+const browserContextCleanupSchedulerMigration = await readFile(
+  new URL("../supabase/maintainflow_browser_context_cleanup_scheduler_migration.sql", import.meta.url),
+  "utf8"
+)
+const browserProviderCostControlsMigration = await readFile(
+  new URL("../supabase/maintainflow_browser_provider_cost_controls_migration.sql", import.meta.url),
+  "utf8"
+)
 const schedulerCapacityContractMigration = await readFile(
   new URL("../supabase/maintainflow_scheduler_capacity_contract_migration.sql", import.meta.url),
   "utf8"
@@ -115,6 +131,10 @@ try {
   await client.query(withoutTransactionWrapper(atomicCheckEvidenceMigration))
   await client.query(withoutTransactionWrapper(schedulerCapacityMigration))
   await client.query(withoutTransactionWrapper(businessEvalsMigration))
+  await client.query(withoutTransactionWrapper(legalAcceptancesMigration))
+  await client.query(withoutTransactionWrapper(browserContextLeasesMigration))
+  await client.query(withoutTransactionWrapper(browserContextCleanupSchedulerMigration))
+  await client.query(withoutTransactionWrapper(browserProviderCostControlsMigration))
 
   if (isContractPhase) {
     const impact = await client.query(`
@@ -246,7 +266,7 @@ try {
           and conrelid = 'public.checks'::regclass
       ) as check_frequency_guard_ready
       ,(
-        select count(*) = 13
+        select count(*) = 19
         from pg_class relation_state
         join pg_namespace relation_namespace on relation_namespace.oid = relation_state.relnamespace
         where relation_namespace.nspname = 'public'
@@ -256,6 +276,12 @@ try {
             'journey_stage_definitions',
             'journey_schedules',
             'eval_runs',
+            'browser_context_leases',
+            'browser_provider_cost_controls',
+            'browser_provider_session_usage',
+            'browser_provider_usage_snapshots',
+            'browser_provider_session_metering_queue',
+            'browser_provider_session_creation_intents',
             'eval_run_side_effect_attempts',
             'eval_stage_runs',
             'evidence_artifacts',
@@ -281,6 +307,31 @@ try {
         and to_regprocedure('public.consume_report_share_link(text)') is not null
         and to_regprocedure('public.claim_provider_webhook_receipt(text,text,text,text,integer)') is not null
         and to_regprocedure('public.finish_provider_webhook_receipt(uuid,uuid,text,boolean,text)') is not null
+        and to_regprocedure('public.register_browser_context_lease(uuid,text,timestamptz)') is not null
+        and to_regprocedure('public.claim_browser_context_session(uuid,text,uuid,integer)') is not null
+        and to_regprocedure('public.record_browser_context_session_started(uuid,text,uuid,text)') is not null
+        and to_regprocedure('public.complete_browser_context_session(uuid,text,uuid,text,text,timestamptz)') is not null
+        and to_regprocedure('public.mark_browser_context_released(uuid,text,text)') is not null
+        and to_regprocedure('public.claim_browser_context_cleanup_batch(integer,text,integer)') is not null
+        and to_regprocedure('public.complete_browser_context_cleanup(uuid,text)') is not null
+        and to_regprocedure('public.retry_browser_context_cleanup(uuid,text,text,integer)') is not null
+        and to_regprocedure('public.record_browser_provider_project_usage(text,bigint,bigint,bigint,bigint,integer,text,text,timestamptz)') is not null
+        and to_regprocedure('public.claim_browser_provider_project_usage_sample(text,text,bigint,bigint,integer,integer)') is not null
+        and to_regprocedure('public.record_browser_provider_session_usage(text,text,uuid,uuid,uuid,text,timestamptz,timestamptz,bigint,text)') is not null
+        and to_regprocedure('public.queue_browser_provider_session_metering(text,text,uuid,uuid,uuid,text)') is not null
+        and to_regprocedure('public.prepare_browser_provider_session_creation(text,text,uuid,uuid,uuid,text)') is not null
+        and to_regprocedure('public.mark_browser_provider_session_creation_uncertain(uuid,text,text)') is not null
+        and to_regprocedure('public.claim_browser_provider_session_creation_reconciliation(text,text,integer,integer)') is not null
+        and to_regprocedure('public.defer_browser_provider_session_creation_reconciliation(uuid,text,text,integer,integer,integer,text,timestamptz)') is not null
+        and to_regprocedure('public.register_browser_provider_session_metering(text,text,uuid,uuid,uuid,text,uuid,text,text,integer)') is not null
+        and to_regprocedure('public.begin_browser_provider_session_terminal_metering(text,text,text,integer)') is not null
+        and to_regprocedure('public.claim_browser_provider_session_metering(text,text,integer,integer)') is not null
+        and to_regprocedure('public.defer_browser_provider_session_metering(text,text,text,integer,integer,integer,text,timestamptz)') is not null
+        and to_regprocedure('public.reopen_browser_provider_session_metering(text,text,integer,text,uuid)') is not null
+        and to_regprocedure('public.reopen_browser_provider_session_creation_reconciliation(uuid,text,integer,text,uuid)') is not null
+        and to_regprocedure('public.claim_browser_provider_daily_reconciliation(text,text,bigint,bigint,integer,integer)') is not null
+        and to_regprocedure('public.mark_browser_provider_usage_failure(text,bigint,bigint,integer,text,boolean,text)') is not null
+        and to_regprocedure('public.get_browser_provider_workspace_usage(uuid,text)') is not null
       ) as business_evals_rpcs_ready
       ,(
         not has_table_privilege('authenticated', 'public.eval_runs', 'insert')
@@ -289,9 +340,104 @@ try {
         and not has_table_privilege('authenticated', 'public.evidence_artifacts', 'insert')
         and not has_table_privilege('authenticated', 'public.report_share_links', 'insert')
         and not has_table_privilege('authenticated', 'public.provider_webhook_receipts', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_context_leases', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_provider_cost_controls', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_provider_session_usage', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_provider_usage_snapshots', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_provider_session_metering_queue', 'select')
+        and not has_table_privilege('authenticated', 'public.browser_provider_session_creation_intents', 'select')
         and has_table_privilege('service_role', 'public.eval_runs', 'insert')
         and has_table_privilege('service_role', 'public.evidence_artifacts', 'insert')
+        and has_table_privilege('service_role', 'public.browser_context_leases', 'select')
+        and has_table_privilege('service_role', 'public.browser_provider_cost_controls', 'select')
+        and has_table_privilege('service_role', 'public.browser_provider_session_usage', 'select')
+        and has_table_privilege('service_role', 'public.browser_provider_usage_snapshots', 'select')
+        and has_table_privilege('service_role', 'public.browser_provider_session_metering_queue', 'select')
+        and has_table_privilege('service_role', 'public.browser_provider_session_creation_intents', 'select')
+        and not has_function_privilege('service_role', 'public.queue_browser_provider_session_metering(text,text,uuid,uuid,uuid,text)', 'execute')
+        and not has_table_privilege('service_role', 'public.browser_context_leases', 'insert')
+        and not has_table_privilege('service_role', 'public.browser_context_leases', 'update')
+        and not has_table_privilege('service_role', 'public.browser_context_leases', 'delete')
       ) as business_evals_service_boundary_ready
+      ,(
+        to_regclass('public.legal_acceptances') is not null
+        and to_regclass('public.auth_account_activations') is not null
+        and exists (
+          select 1
+          from pg_trigger trigger_state
+          where trigger_state.tgname = 'auth_users_capture_maintainflow_legal_acceptance'
+            and trigger_state.tgrelid = 'auth.users'::regclass
+            and trigger_state.tgfoid = to_regprocedure('public.capture_email_signup_legal_acceptance()')
+            and not trigger_state.tgisinternal
+            and trigger_state.tgenabled <> 'D'
+        )
+        and exists (
+          select 1
+          from pg_trigger trigger_state
+          where trigger_state.tgname = 'memberships_require_current_legal_acceptance'
+            and trigger_state.tgrelid = 'public.memberships'::regclass
+            and trigger_state.tgfoid = to_regprocedure('public.enforce_current_legal_acceptance_for_membership()')
+            and not trigger_state.tgisinternal
+            and trigger_state.tgenabled <> 'D'
+        )
+        and exists (
+          select 1
+          from pg_trigger trigger_state
+          where trigger_state.tgname = 'memberships_require_email_signup_activation'
+            and trigger_state.tgrelid = 'public.memberships'::regclass
+            and trigger_state.tgfoid = to_regprocedure('public.enforce_email_signup_activation_for_membership()')
+            and not trigger_state.tgisinternal
+            and trigger_state.tgenabled <> 'D'
+        )
+        and to_regprocedure('public.record_current_legal_acceptance(uuid,text,text,text,text)') is not null
+        and to_regprocedure('public.current_auth_account_activation_status()') is not null
+        and to_regprocedure('public.activate_email_signup_account(uuid)') is not null
+        and not has_table_privilege('anon', 'public.legal_acceptances', 'select')
+        and not has_table_privilege('authenticated', 'public.legal_acceptances', 'select')
+        and not has_table_privilege('authenticated', 'public.legal_acceptances', 'insert')
+        and not has_table_privilege('authenticated', 'public.legal_acceptances', 'update')
+        and not has_table_privilege('authenticated', 'public.legal_acceptances', 'delete')
+        and has_table_privilege('service_role', 'public.legal_acceptances', 'select')
+        and not has_table_privilege('service_role', 'public.legal_acceptances', 'insert')
+        and not has_table_privilege('service_role', 'public.legal_acceptances', 'update')
+        and not has_table_privilege('service_role', 'public.legal_acceptances', 'delete')
+        and not has_table_privilege('anon', 'public.auth_account_activations', 'select')
+        and not has_table_privilege('authenticated', 'public.auth_account_activations', 'select')
+        and has_table_privilege('service_role', 'public.auth_account_activations', 'select')
+        and not has_table_privilege('service_role', 'public.auth_account_activations', 'insert')
+        and not has_table_privilege('service_role', 'public.auth_account_activations', 'update')
+        and not has_table_privilege('service_role', 'public.auth_account_activations', 'delete')
+        and has_function_privilege(
+          'service_role',
+          'public.record_current_legal_acceptance(uuid,text,text,text,text)',
+          'execute'
+        )
+        and not has_function_privilege(
+          'authenticated',
+          'public.record_current_legal_acceptance(uuid,text,text,text,text)',
+          'execute'
+        )
+        and has_function_privilege(
+          'authenticated',
+          'public.current_auth_account_activation_status()',
+          'execute'
+        )
+        and not has_function_privilege(
+          'anon',
+          'public.current_auth_account_activation_status()',
+          'execute'
+        )
+        and has_function_privilege(
+          'service_role',
+          'public.activate_email_signup_account(uuid)',
+          'execute'
+        )
+        and not has_function_privilege(
+          'authenticated',
+          'public.activate_email_signup_account(uuid)',
+          'execute'
+        )
+      ) as legal_acceptance_boundary_ready
       ,(
         select count(*) = 2
         from information_schema.columns
@@ -750,6 +896,8 @@ try {
     : null
   let paidPilotRetryJobAbsent = true
   let schedulerCapacityReady = !isProductionBuild
+  let businessEvalsSchedulerReady = !isProductionBuild
+  let browserContextCleanupSchedulerReady = !isProductionBuild
   const expectedSchedulerBatchSize = isContractPhase ? 5 : 1
 
   if (cronCatalog.rows[0]?.available) {
@@ -770,10 +918,32 @@ try {
             and bool_and(command ~* '''batchSize''\\s*,\\s*${expectedSchedulerBatchSize}')
           from cron.job
           where jobname in ('maintainflow-run-checks', 'maintainflow-run-checks-2')
-        ) as scheduler_capacity_ready
+        ) as scheduler_capacity_ready,
+        (
+          select count(*) = 1
+            and bool_and(active)
+            and bool_and(schedule = '* * * * *')
+            and bool_and(command like '%/api/cron/run-evals%')
+            and bool_and(command ~* 'timeout_milliseconds\\s*:=\\s*60000')
+            and bool_and(command ~* '''batchSize''\\s*,\\s*5')
+          from cron.job
+          where jobname = 'maintainflow-run-evals'
+        ) as business_evals_scheduler_ready,
+        (
+          select count(*) = 1
+            and bool_and(active)
+            and bool_and(schedule = '* * * * *')
+            and bool_and(command like '%/api/cron/cleanup-browser-contexts%')
+            and bool_and(command ~* 'timeout_milliseconds\\s*:=\\s*60000')
+            and bool_and(command ~* '''batchSize''\\s*,\\s*4')
+          from cron.job
+          where jobname = 'maintainflow-cleanup-browser-contexts'
+        ) as browser_context_cleanup_scheduler_ready
     `)
     paidPilotRetryJobAbsent = cronState.rows[0]?.paid_pilot_absent === true
     schedulerCapacityReady = cronState.rows[0]?.scheduler_capacity_ready === true
+    businessEvalsSchedulerReady = cronState.rows[0]?.business_evals_scheduler_ready === true
+    browserContextCleanupSchedulerReady = cronState.rows[0]?.browser_context_cleanup_scheduler_ready === true
   }
 
   const state = {
@@ -787,6 +957,8 @@ try {
     paid_pilot_retry_job_absent: paidPilotRetryJobAbsent,
     scheduler_capacity_ready: schedulerCapacityReady,
     scheduler_batch_size: expectedSchedulerBatchSize,
+    business_evals_scheduler_ready: businessEvalsSchedulerReady,
+    browser_context_cleanup_scheduler_ready: browserContextCleanupSchedulerReady,
   }
 
   if (
@@ -810,6 +982,7 @@ try {
     || !state.business_evals_foundation_ready
     || !state.business_evals_rpcs_ready
     || !state.business_evals_service_boundary_ready
+    || !state.legal_acceptance_boundary_ready
     || !state.issue_verification_columns_ready
     || !state.report_snapshot_columns_ready
     || !state.report_item_snapshot_column_ready
@@ -821,6 +994,8 @@ try {
     || !state.workflow_assurance_function_ready
     || !state.claim_due_checks_cas_columns_ready
     || !state.scheduler_capacity_ready
+    || !state.business_evals_scheduler_ready
+    || !state.browser_context_cleanup_scheduler_ready
     || (!isContractPhase && !state.expand_check_run_provenance_policies_ready)
     || (
       isContractPhase
@@ -871,6 +1046,7 @@ try {
         state.business_evals_foundation_ready
         && state.business_evals_rpcs_ready
         && state.business_evals_service_boundary_ready,
+      legalAcceptanceBoundaryReady: state.legal_acceptance_boundary_ready,
       freePlanReady: state.free_plan_ready,
       oneWorkspacePerUserReady: state.one_workspace_per_user_ready,
       billingLimitTriggersReady:
@@ -895,6 +1071,8 @@ try {
         : state.expand_check_run_provenance_policies_ready,
       schedulerCapacityReady: state.scheduler_capacity_ready,
       schedulerBatchSize: state.scheduler_batch_size,
+      businessEvalsSchedulerReady: state.business_evals_scheduler_ready,
+      browserContextCleanupSchedulerReady: state.browser_context_cleanup_scheduler_ready,
       serviceEvidenceWriteBoundaryReady: isContractPhase
         ? state.authenticated_evidence_tables_select_only
           && state.authenticated_evidence_write_policies_absent

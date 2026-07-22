@@ -7,6 +7,8 @@ import { getBusinessEvalsEntitlement } from "@/lib/api/business-evals-entitlemen
 import { annualBillingDiscountPercent } from "@/lib/billing/plans"
 import { portalConfigReason } from "@/lib/billing/stripe"
 import { getSupabaseServerConfig, supabaseServiceJson } from "@/lib/supabase/server"
+import { supabaseServiceAuthHeaders } from "@/lib/supabase/api-key-roles"
+import { getWorkspaceBrowserProviderUsage } from "@/lib/runner/browserbase-usage-control.server"
 
 type Row = Record<string, unknown>
 type WorkspaceRole = "owner" | "admin" | "member"
@@ -89,7 +91,7 @@ export async function listWorkspaceTeam(agencyId: string) {
 }
 
 export async function getWorkspaceBillingSettings(agencyId: string) {
-  const [entitlement, agencies, projects, journeys, runs, seats] = await Promise.all([
+  const [entitlement, agencies, projects, journeys, runs, seats, browserUsage] = await Promise.all([
     getBusinessEvalsEntitlement(agencyId),
     supabaseServiceJson<Row[]>(`agencies?${query({
       select: "id,plan,team_trial_started_at,team_trial_ends_at,team_trial_used_at,billing_contract_version,stripe_customer_id,stripe_subscription_id,stripe_subscription_status",
@@ -108,6 +110,7 @@ export async function getWorkspaceBillingSettings(agencyId: string) {
       quota_period_start: `eq.${new Date().toISOString().slice(0, 7)}-01`,
     }),
     supabaseServiceCount("memberships", { agency_id: `eq.${agencyId}` }),
+    getWorkspaceBrowserProviderUsage(agencyId),
   ])
   const agency = agencies[0]
   if (!agency) throw new BusinessEvalsApiError(404, "WORKSPACE_NOT_FOUND", "Workspace not found.")
@@ -131,6 +134,7 @@ export async function getWorkspaceBillingSettings(agencyId: string) {
       runs: { used: runs, limit: entitlement.runLimit },
       seats: { used: seats, limit: entitlement.seatLimit },
       evidenceRetentionDays: entitlement.evidenceDays,
+      browser: browserUsage,
     },
     features: entitlement.features,
     trial: {
@@ -328,8 +332,7 @@ async function supabaseServiceCount(table: string, filters: Record<string, strin
   const response = await fetch(`${config.restUrl}/${table}?${query({ select, ...filters })}`, {
     method: "HEAD",
     headers: {
-      apikey: config.serviceRoleKey,
-      Authorization: `Bearer ${config.serviceRoleKey}`,
+      ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       Prefer: "count=exact",
     },
   })
@@ -356,8 +359,7 @@ function presentWorkspace(row: Row) {
 
 function adminAuthHeaders(serviceRoleKey: string) {
   return {
-    apikey: serviceRoleKey,
-    Authorization: `Bearer ${serviceRoleKey}`,
+    ...supabaseServiceAuthHeaders(serviceRoleKey),
     "Content-Type": "application/json",
   }
 }

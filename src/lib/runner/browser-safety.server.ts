@@ -10,6 +10,7 @@ export type BrowserNetworkMode = "pinned_worker" | "external_proxy"
 export type BrowserDestinationGuards = {
   assertExecutionAllowed?: () => Promise<void>
   consumeDestination?: (url: URL) => Promise<void>
+  blockSideEffects?: boolean
 }
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -94,6 +95,12 @@ export async function installTopLevelNavigationGuard(
         throw new BrowserSafetyError(
           "UNSUPPORTED_SCHEME",
           `Browser eval network requests must use public HTTPS; ${protocol || "unknown"} is blocked.`
+        )
+      }
+      if (guards.blockSideEffects && isSideEffectingRequest(request)) {
+        throw new BrowserSafetyError(
+          "SIDE_EFFECT_BLOCKED",
+          "Read-only page scans block mutation-class browser requests."
         )
       }
       const requiresAuthorization = requiresDestinationAuthorization(request)
@@ -219,8 +226,12 @@ export async function pageContainsCaptcha(page: Page) {
 
 function requiresDestinationAuthorization(request: PlaywrightRequest) {
   const topLevelNavigation = request.isNavigationRequest() && request.frame() === request.frame().page().mainFrame()
-  const sideEffectingRequest = !["GET", "HEAD", "OPTIONS"].includes(request.method().toUpperCase())
+  const sideEffectingRequest = isSideEffectingRequest(request)
   return topLevelNavigation || sideEffectingRequest
+}
+
+function isSideEffectingRequest(request: PlaywrightRequest) {
+  return !["GET", "HEAD", "OPTIONS"].includes(request.method().toUpperCase())
 }
 
 function configuredDomainDenylist() {

@@ -1,6 +1,7 @@
 "use client"
 
 import { normalizeEmailAddress, validateDeliverableEmail } from "./auth/email.ts"
+import { CORE_DB_KEY } from "./browser-storage-keys.ts"
 
 export type AuthUser = {
   id: string
@@ -298,4 +299,8 @@ export function signOutLocalUser() {
   }
 
   window.localStorage.removeItem(SESSION_KEY)
+  window.localStorage.removeItem(CORE_DB_KEY)
+  if ("sessionStorage" in window) {
+    window.sessionStorage.removeItem(CORE_DB_KEY)
+  }
 }

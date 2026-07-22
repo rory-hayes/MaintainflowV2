@@ -58,7 +58,7 @@ AI may suggest steps/assertions, generate human-readable labels, summarize evide
 ## First-value journey
 
 1. Sign up and create one workspace.
-2. Receive the one-time, card-free 14-day Team trial.
+2. Continue on Free or explicitly activate the one-time, card-free 14-day Team trial.
 3. Create a project and add an approved domain.
 4. Attest authority and safe-test conditions.
 5. Choose a form or signup journey template.

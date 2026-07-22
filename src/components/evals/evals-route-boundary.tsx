@@ -4,8 +4,9 @@ import { useAuth } from "@/components/auth/auth-provider"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Spinner } from "@/components/ui/spinner"
+import { safeSignInHrefForRoute } from "@/lib/auth/next-path"
 import Link from "next/link"
-import { usePathname, useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { useEffect, useState, type ReactNode } from "react"
 import { probeBusinessEvalsAccess } from "./api-adapters"
 import { EvalsProvider } from "./evals-provider"
@@ -20,6 +21,7 @@ export function EvalsRouteBoundary({ children, previewEnabled = false, disabledF
 function ProductionEvalsBoundary({ children, disabledFallback }: { children: ReactNode; disabledFallback?: ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { ready, user } = useAuth()
   const [workspaceId, setWorkspaceId] = useState("")
   const [error, setError] = useState("")
@@ -27,6 +29,7 @@ function ProductionEvalsBoundary({ children, disabledFallback }: { children: Rea
   const [retryKey, setRetryKey] = useState(0)
   const routeData = useRouteScopedEvals(pathname, workspaceId)
   const hooks = useProductionEvalsHooks(workspaceId)
+  const signInHref = safeSignInHrefForRoute(pathname, searchParams.toString())
 
   useEffect(() => {
     if (!ready || !user) return
@@ -48,7 +51,7 @@ function ProductionEvalsBoundary({ children, disabledFallback }: { children: Rea
   }, [disabledFallback, ready, retryKey, router, user])
 
   if (!ready) return <BoundaryState title="Loading business evals" description="Checking your workspace session." loading />
-  if (!user) return <BoundaryState title="Sign in required" description="Sign in to access this Maintain Flow workspace." action={<Button nativeButton={false} render={<Link href="/sign-in?next=%2Fprojects" />}>Sign in</Button>} />
+  if (!user) return <BoundaryState title="Sign in required" description="Sign in to access this Maintain Flow workspace." action={<Button nativeButton={false} render={<Link href={signInHref} />}>Sign in</Button>} />
   if (disabled && disabledFallback) return disabledFallback
   if (error) return <BoundaryState title="Business evals are unavailable" description={error} action={<Button onClick={() => setRetryKey((key) => key + 1)}>Try again</Button>} />
   if (!workspaceId) return <BoundaryState title="Loading business evals" description="Loading tenant-scoped projects, journeys and evidence." loading />

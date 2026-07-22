@@ -1,13 +1,14 @@
 import { defineConfig, devices } from "@playwright/test"
+import { randomBytes } from "node:crypto"
 
 const baseURL = process.env.BUSINESS_EVALS_E2E_BASE_URL ?? "http://127.0.0.1:3100"
+const previewToken = randomBytes(32).toString("hex")
 
 export default defineConfig({
   testDir: "./tests/e2e",
   testMatch: "business-evals-preview.spec.ts",
-  // These tests intentionally exercise cold App Router pages against an
-  // isolated development server. The budget covers compilation; individual
-  // product assertions still use tighter explicit timeouts.
+  // Release acceptance runs against an isolated production build so strict
+  // CSP remains enabled without development-only React eval diagnostics.
   timeout: 120_000,
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
@@ -17,6 +18,9 @@ export default defineConfig({
   use: {
     baseURL,
     colorScheme: "light",
+    extraHTTPHeaders: {
+      "x-maintainflow-e2e-preview-token": previewToken,
+    },
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
@@ -49,12 +53,14 @@ export default defineConfig({
   webServer: process.env.BUSINESS_EVALS_E2E_BASE_URL
     ? undefined
     : {
-        command: "pnpm exec next dev --hostname 127.0.0.1 --port 3100",
+        command: "pnpm exec next build --webpack && pnpm exec next start --hostname 127.0.0.1 --port 3100",
         url: baseURL,
-        reuseExistingServer: !process.env.CI,
-        timeout: 180_000,
+        reuseExistingServer: false,
+        timeout: 300_000,
         env: {
           BUSINESS_EVALS_PREVIEW: "1",
+          BUSINESS_EVALS_E2E_PREVIEW_TOKEN: previewToken,
+          NEXT_TELEMETRY_DISABLED: "1",
         },
       },
 })

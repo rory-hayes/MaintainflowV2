@@ -111,6 +111,21 @@ test("the Business Evals public positioning is the unconditional canonical homep
   assert.doesNotMatch(landing, /Safe enough for production journeys|production-ready|now live/i)
 })
 
+test("the browser release acceptance suite runs an isolated production build", () => {
+  const config = readFileSync("playwright.business-evals.config.ts", "utf8")
+  const previewGate = readFileSync("src/lib/features/business-evals-preview.server.ts", "utf8")
+
+  assert.match(config, /next build --webpack && pnpm exec next start/)
+  assert.match(config, /reuseExistingServer: false/)
+  assert.match(config, /BUSINESS_EVALS_PREVIEW: "1"/)
+  assert.match(config, /randomBytes\(32\)\.toString\("hex"\)/)
+  assert.match(config, /BUSINESS_EVALS_E2E_PREVIEW_TOKEN: previewToken/)
+  assert.match(config, /x-maintainflow-e2e-preview-token/)
+  assert.match(config, /NEXT_TELEMETRY_DISABLED: "1"/)
+  assert.doesNotMatch(config, /next dev/)
+  assert.match(previewGate, /isBusinessEvalsPreviewRequestAllowed/)
+})
+
 test("the builder exposes every deterministic launch configuration and owner-approved action domains", () => {
   const builder = readFileSync("src/components/evals/pages/journeys-pages.tsx", "utf8")
   const projects = readFileSync("src/components/evals/pages/projects-pages.tsx", "utf8")
@@ -144,7 +159,7 @@ test("Business Evals routes avoid the legacy workspace mirror while legacy fallb
   assert.doesNotMatch(legacyPrefixList, /"\/settings"/)
   assert.match(boundary, /pathname === "\/settings"/)
   assert.match(conditional, /legacyWithProvider = <CoreLoopProvider>/)
-  assert.match(conditional, /BUSINESS_EVALS_PREVIEW === "1"/)
+  assert.match(conditional, /isBusinessEvalsPreviewEnabled\(\)/)
   assert.match(conditional, /<EvalsRouteBoundary previewEnabled>/)
   assert.match(onboarding, /Lead forms can run no more often than hourly/)
   assert.match(onboarding, /Trial signup journeys no more often than every six hours/)

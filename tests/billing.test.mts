@@ -29,17 +29,21 @@ import {
   publicBillingPlanIds,
 } from "../src/lib/billing/plans.ts"
 import {
+  assertStripeCheckoutSessionMatchesReservation,
   checkoutConfigReason,
   createStripeCheckoutSession,
   createStripeCustomerPortalSession,
+  expireStripeCheckoutSession,
   getBillingPlanIdForStripePrice,
   getStripeBillingStatus,
   getTrustedBillingOrigin,
   isBillingPortalFlow,
   isStripeHostedUrl,
   portalConfigReason,
+  retrieveStripeCheckoutSession,
   retrieveStripeSubscription,
   resolveStripeSubscriptionPlanId,
+  stripeApiVersion,
   verifyStripeWebhookSignature,
 } from "../src/lib/billing/stripe.ts"
 
@@ -48,6 +52,57 @@ function restoreEnv(name: string, value: string | undefined) {
     delete process.env[name]
   } else {
     process.env[name] = value
+  }
+}
+
+const productionCheckoutEnv = {
+  STRIPE_SECRET_KEY: "sk_test_checkout",
+  STRIPE_WEBHOOK_SECRET: "whsec_checkout",
+  STRIPE_PRICE_SOLO: "price_starter_monthly",
+  STRIPE_PRICE_TEAM: "price_growth_monthly",
+  STRIPE_PRICE_AGENCY: "price_scale_monthly",
+  STRIPE_PRICE_SOLO_ANNUAL: "price_starter_annual",
+  STRIPE_PRICE_TEAM_ANNUAL: "price_growth_annual",
+  STRIPE_PRICE_AGENCY_ANNUAL: "price_scale_annual",
+  STRIPE_CUSTOMER_PORTAL_ENABLED: "true",
+  STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID: "bpc_test_checkout",
+} as const
+
+function configureProductionCheckoutEnv(overrides: Partial<Record<keyof typeof productionCheckoutEnv, string>> = {}) {
+  const previous = Object.fromEntries(
+    Object.keys(productionCheckoutEnv).map((key) => [key, process.env[key]])
+  ) as Record<keyof typeof productionCheckoutEnv, string | undefined>
+  for (const [key, value] of Object.entries({ ...productionCheckoutEnv, ...overrides })) {
+    process.env[key] = value
+  }
+  return () => {
+    for (const [key, value] of Object.entries(previous)) restoreEnv(key, value)
+  }
+}
+
+const checkoutReservationId = "00000000-0000-4000-8000-000000000777"
+const checkoutProviderExpiresAt = "2030-01-01T00:00:00.000Z"
+const checkoutProviderExpiresAtSeconds = Math.floor(Date.parse(checkoutProviderExpiresAt) / 1000)
+
+function checkoutSessionPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "cs_test_shared",
+    url: "https://checkout.stripe.com/c/pay/cs_test_shared",
+    status: "open",
+    payment_status: "unpaid",
+    expires_at: checkoutProviderExpiresAtSeconds,
+    customer: null,
+    subscription: null,
+    client_reference_id: "agency_123",
+    metadata: {
+      maintainflow_plan: "starter",
+      maintainflow_billing_interval: "monthly",
+      maintainflow_billing_contract: "business_evals_v1",
+      maintainflow_agency_id: "agency_123",
+      maintainflow_user_id: "user_123",
+      maintainflow_checkout_reservation_id: checkoutReservationId,
+    },
+    ...overrides,
   }
 }
 
@@ -156,6 +211,7 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
   const originalStarterAnnualPrice = process.env.STRIPE_PRICE_SOLO_ANNUAL
   const originalGrowthAnnualPrice = process.env.STRIPE_PRICE_TEAM_ANNUAL
   const originalScaleAnnualPrice = process.env.STRIPE_PRICE_AGENCY_ANNUAL
+  const originalWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET
   const originalPortalEnabled = process.env.STRIPE_CUSTOMER_PORTAL_ENABLED
   const originalPortalConfigurationId = process.env.STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID
 
@@ -167,6 +223,7 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
     delete process.env.STRIPE_PRICE_SOLO_ANNUAL
     process.env.STRIPE_PRICE_TEAM_ANNUAL = "price_growth_annual"
     delete process.env.STRIPE_PRICE_AGENCY_ANNUAL
+    delete process.env.STRIPE_WEBHOOK_SECRET
     process.env.STRIPE_CUSTOMER_PORTAL_ENABLED = "true"
     process.env.STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID = "bpc_test_self_serve"
 
@@ -174,10 +231,12 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
     assert.match(checkoutConfigReason("free"), /does not require Stripe checkout/)
     assert.match(checkoutConfigReason("agency_plus"), /not available to new self-serve customers/)
     for (const planId of ["starter", "growth", "scale"] as const) {
-      assert.equal(checkoutConfigReason(planId), "")
+      assert.match(checkoutConfigReason(planId), /signed billing webhooks/)
     }
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_self_serve"
+    assert.match(checkoutConfigReason("starter"), /all six distinct/)
     assert.match(checkoutConfigReason("starter", "annual"), /Annual billing is not available/)
-    assert.equal(checkoutConfigReason("growth", "annual"), "")
+    assert.match(checkoutConfigReason("growth", "annual"), /all six distinct/)
     assert.match(checkoutConfigReason("scale", "annual"), /Annual billing is not available/)
 
     assert.equal(getBillingPlanIdForStripePrice("price_starter_monthly"), "starter")
@@ -185,6 +244,7 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
     assert.equal(getBillingPlanIdForStripePrice("price_unknown"), null)
     assert.deepEqual(getStripeBillingStatus(), {
       secretConfigured: true,
+      webhookConfigured: true,
       prices: {
         free: Boolean(process.env.STRIPE_PRICE_FREE),
         starter: true,
@@ -199,15 +259,37 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
         scale: Boolean(process.env.STRIPE_PRICE_AGENCY_ANNUAL),
         agency_plus: Boolean(process.env.STRIPE_PRICE_AGENCY_PLUS_ANNUAL),
       },
-      checkoutConfigured: true,
+      publicPricesConfigured: false,
+      checkoutConfigured: false,
       portalConfigured: true,
       workspaceTrialDays: 14,
     })
 
+    process.env.STRIPE_PRICE_SOLO_ANNUAL = "price_starter_annual"
+    process.env.STRIPE_PRICE_AGENCY_ANNUAL = "price_scale_annual"
+    assert.equal(getStripeBillingStatus().publicPricesConfigured, true)
+    assert.equal(getStripeBillingStatus().checkoutConfigured, true)
+    for (const planId of ["starter", "growth", "scale"] as const) {
+      assert.equal(checkoutConfigReason(planId), "")
+      assert.equal(checkoutConfigReason(planId, "annual"), "")
+    }
+
+    process.env.STRIPE_PRICE_AGENCY_ANNUAL = "price_starter_annual"
+    assert.equal(getStripeBillingStatus().publicPricesConfigured, false)
+    assert.equal(getStripeBillingStatus().checkoutConfigured, false)
+    assert.match(checkoutConfigReason("starter"), /all six distinct/)
+    process.env.STRIPE_PRICE_AGENCY_ANNUAL = "price_scale_annual"
+
+    delete process.env.STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID
+    assert.equal(getStripeBillingStatus().portalConfigured, false)
+    assert.equal(getStripeBillingStatus().checkoutConfigured, false)
+    assert.match(checkoutConfigReason("starter"), /Customer Portal/)
+    process.env.STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID = "bpc_test_self_serve"
+
     delete process.env.STRIPE_PRICE_TEAM
     delete process.env.STRIPE_PRICE_AGENCY
-    assert.equal(getStripeBillingStatus().checkoutConfigured, true)
-    assert.equal(checkoutConfigReason("starter"), "")
+    assert.equal(getStripeBillingStatus().checkoutConfigured, false)
+    assert.match(checkoutConfigReason("starter"), /all six distinct/)
     assert.match(checkoutConfigReason("growth"), /temporarily unavailable/)
   } finally {
     restoreEnv("STRIPE_SECRET_KEY", originalSecret)
@@ -217,6 +299,7 @@ test("checkout allowlisting accepts only Solo, Team, and Agency when new Stripe 
     restoreEnv("STRIPE_PRICE_SOLO_ANNUAL", originalStarterAnnualPrice)
     restoreEnv("STRIPE_PRICE_TEAM_ANNUAL", originalGrowthAnnualPrice)
     restoreEnv("STRIPE_PRICE_AGENCY_ANNUAL", originalScaleAnnualPrice)
+    restoreEnv("STRIPE_WEBHOOK_SECRET", originalWebhookSecret)
     restoreEnv("STRIPE_CUSTOMER_PORTAL_ENABLED", originalPortalEnabled)
     restoreEnv("STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID", originalPortalConfigurationId)
   }
@@ -270,10 +353,53 @@ test("checkout route authenticates an admin and derives all sensitive checkout f
   assert.match(source, /userId: workspace\.user\.id/)
   assert.match(source, /customerId: workspace\.agency\.stripeCustomerId/)
   assert.match(source, /customerEmail: workspace\.user\.email/)
+  assert.match(source, /reserveStripeCheckoutSession\(reservationInput\)/)
+  assert.match(source, /planId: reservation\.planId/)
+  assert.match(source, /interval: reservation\.interval/)
+  assert.match(source, /providerIdempotencyKey: reservation\.providerIdempotencyKey/)
+  assert.match(source, /providerExpiresAt: reservation\.providerExpiresAt/)
+  assert.match(source, /if \(reservation\.planId !== plan \|\| reservation\.interval !== interval\)[\s\S]+status: 409/)
+  assert.match(source, /No checkout was opened for your selection/)
   assert.doesNotMatch(source, /body\.(?:price|amount|agencyId|userId|customerId|customerEmail)/)
   assert.match(source, /BillingAuthenticationError[\s\S]+\? 401/)
   assert.match(source, /BillingAuthorizationError[\s\S]+\? 403/)
   assert.match(source, /BillingWorkspaceRequiredError[\s\S]+\? 409/)
+})
+
+test("checkout creation uses the durable reservation provider key instead of a browser or plan-derived key", async () => {
+  const originalFetch = globalThis.fetch
+  const restoreCheckoutEnv = configureProductionCheckoutEnv()
+  const providerKeys: string[] = []
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      providerKeys.push(new Headers(init?.headers).get("idempotency-key") ?? "")
+      return new Response(JSON.stringify(checkoutSessionPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as typeof fetch
+
+    const base = {
+      planId: "starter" as const,
+      interval: "monthly" as const,
+      origin: "https://www.maintainflow.io",
+      agencyId: "agency_123",
+      userId: "user_123",
+      reservationId: checkoutReservationId,
+      providerIdempotencyKey: `maintainflow-checkout-${"a".repeat(64)}`,
+      providerExpiresAt: checkoutProviderExpiresAt,
+    }
+    await createStripeCheckoutSession(base)
+    await createStripeCheckoutSession(base)
+
+    assert.equal(providerKeys.length, 2)
+    assert.equal(providerKeys[0], providerKeys[1])
+    assert.equal(providerKeys[0], `maintainflow-checkout-${"a".repeat(64)}`)
+  } finally {
+    globalThis.fetch = originalFetch
+    restoreCheckoutEnv()
+  }
 })
 
 test("billing return URLs use a trusted configured origin with a production-safe fallback", () => {
@@ -310,19 +436,19 @@ test("billing return URLs use a trusted configured origin with a production-safe
 test("checkout creation sends trusted Business Evals metadata without restarting a trial", async () => {
   const originalFetch = globalThis.fetch
   const originalNow = Date.now
-  const originalSecret = process.env.STRIPE_SECRET_KEY
-  const originalStarterPrice = process.env.STRIPE_PRICE_SOLO
+  const restoreCheckoutEnv = configureProductionCheckoutEnv()
   let capturedInput: string | URL | Request = ""
   let capturedInit: RequestInit | undefined
 
   try {
-    process.env.STRIPE_SECRET_KEY = "sk_test_checkout"
-    process.env.STRIPE_PRICE_SOLO = "price_starter_monthly"
     Date.now = () => 1_800_000_000_000
     globalThis.fetch = (async (input, init) => {
       capturedInput = input
       capturedInit = init
-      return new Response(JSON.stringify({ url: "https://checkout.stripe.com/c/pay/cs_test_123" }), {
+      return new Response(JSON.stringify(checkoutSessionPayload({
+        id: "cs_test_123",
+        url: "https://checkout.stripe.com/c/pay/cs_test_123",
+      })), {
         status: 200,
         headers: { "content-type": "application/json" },
       })
@@ -334,12 +460,15 @@ test("checkout creation sends trusted Business Evals metadata without restarting
       origin: "https://www.maintainflow.io",
       agencyId: "agency_123",
       userId: "user_123",
+      reservationId: checkoutReservationId,
       customerId: " cus_123 ",
       customerEmail: "ignored@example.com",
-      idempotencyKey: "checkout-request-123",
+      providerIdempotencyKey: `maintainflow-checkout-${"b".repeat(64)}`,
+      providerExpiresAt: checkoutProviderExpiresAt,
     })
 
-    assert.equal(result, "https://checkout.stripe.com/c/pay/cs_test_123")
+    assert.equal(result.url, "https://checkout.stripe.com/c/pay/cs_test_123")
+    assert.equal(result.id, "cs_test_123")
     assert.equal(String(capturedInput), "https://api.stripe.com/v1/checkout/sessions")
     assert.equal(capturedInit?.method, "POST")
     const headers = new Headers(capturedInit?.headers)
@@ -347,12 +476,14 @@ test("checkout creation sends trusted Business Evals metadata without restarting
     assert.equal(headers.get("content-type"), "application/x-www-form-urlencoded")
     const checkoutIdempotencyKey = headers.get("idempotency-key")
     assert.ok(checkoutIdempotencyKey)
-    assert.match(checkoutIdempotencyKey, /^maintainflow-checkout-[a-f0-9]{64}$/)
+    assert.equal(checkoutIdempotencyKey, `maintainflow-checkout-${"b".repeat(64)}`)
+    assert.equal(headers.get("stripe-version"), stripeApiVersion)
 
     const body = new URLSearchParams(String(capturedInit?.body))
     assert.equal(body.get("mode"), "subscription")
-    assert.equal(body.get("success_url"), "https://www.maintainflow.io/settings?tab=billing&billing=checkout-success")
-    assert.equal(body.get("cancel_url"), "https://www.maintainflow.io/settings?tab=billing&billing=checkout-cancelled")
+    assert.equal(body.get("success_url"), `https://www.maintainflow.io/settings/billing?billing=checkout-success&session_id={CHECKOUT_SESSION_ID}&reservation_id=${checkoutReservationId}`)
+    assert.equal(body.get("cancel_url"), `https://www.maintainflow.io/settings/billing?billing=checkout-cancelled&reservation_id=${checkoutReservationId}`)
+    assert.equal(body.get("expires_at"), String(checkoutProviderExpiresAtSeconds))
     assert.equal(body.get("line_items[0][price]"), "price_starter_monthly")
     assert.equal(body.get("line_items[0][quantity]"), "1")
     assert.equal(body.get("allow_promotion_codes"), "true")
@@ -362,6 +493,7 @@ test("checkout creation sends trusted Business Evals metadata without restarting
     assert.equal(body.get("metadata[maintainflow_billing_contract]"), "business_evals_v1")
     assert.equal(body.get("metadata[maintainflow_agency_id]"), "agency_123")
     assert.equal(body.get("metadata[maintainflow_user_id]"), "user_123")
+    assert.equal(body.get("metadata[maintainflow_checkout_reservation_id]"), checkoutReservationId)
     assert.equal(body.has("subscription_data[trial_period_days]"), false)
     assert.equal(body.get("subscription_data[metadata][maintainflow_plan]"), "starter")
     assert.equal(body.get("subscription_data[metadata][maintainflow_billing_contract]"), "business_evals_v1")
@@ -371,8 +503,7 @@ test("checkout creation sends trusted Business Evals metadata without restarting
   } finally {
     globalThis.fetch = originalFetch
     Date.now = originalNow
-    restoreEnv("STRIPE_SECRET_KEY", originalSecret)
-    restoreEnv("STRIPE_PRICE_SOLO", originalStarterPrice)
+    restoreCheckoutEnv()
   }
 })
 
@@ -384,13 +515,10 @@ test("Stripe redirects are restricted to HTTPS Stripe hosts and invalid checkout
   assert.equal(isStripeHostedUrl("https://maintainflow.io/settings"), false)
 
   const originalFetch = globalThis.fetch
-  const originalSecret = process.env.STRIPE_SECRET_KEY
-  const originalGrowthPrice = process.env.STRIPE_PRICE_TEAM
+  const restoreCheckoutEnv = configureProductionCheckoutEnv()
   try {
-    process.env.STRIPE_SECRET_KEY = "sk_test_checkout"
-    process.env.STRIPE_PRICE_TEAM = "price_growth_monthly"
     globalThis.fetch = (async () => new Response(
-      JSON.stringify({ url: "https://checkout.stripe.evil.test/c/pay/session" }),
+      JSON.stringify(checkoutSessionPayload({ url: "https://checkout.stripe.evil.test/c/pay/session" })),
       { status: 200, headers: { "content-type": "application/json" } }
     )) as typeof fetch
 
@@ -400,14 +528,51 @@ test("Stripe redirects are restricted to HTTPS Stripe hosts and invalid checkout
         origin: "https://www.maintainflow.io",
         agencyId: "agency_123",
         userId: "user_123",
-        idempotencyKey: "checkout-request-456",
+        reservationId: checkoutReservationId,
+        providerIdempotencyKey: `maintainflow-checkout-${"c".repeat(64)}`,
+        providerExpiresAt: checkoutProviderExpiresAt,
       }),
-      /valid hosted checkout URL/
+      /valid hosted Checkout Session/
     )
   } finally {
     globalThis.fetch = originalFetch
-    restoreEnv("STRIPE_SECRET_KEY", originalSecret)
-    restoreEnv("STRIPE_PRICE_TEAM", originalGrowthPrice)
+    restoreCheckoutEnv()
+  }
+})
+
+test("Checkout return validation binds provider truth to the exact workspace reservation", () => {
+  const reservation = {
+    id: checkoutReservationId,
+    agencyId: "agency_123",
+    requestedByUserId: "user_123",
+    planId: "starter",
+    interval: "monthly",
+    providerExpiresAt: checkoutProviderExpiresAt,
+    stripeSessionId: "cs_test_shared",
+  }
+  const session = {
+    id: "cs_test_shared",
+    url: "",
+    status: "complete" as const,
+    paymentStatus: "paid",
+    expiresAt: checkoutProviderExpiresAtSeconds,
+    customerId: "cus_123",
+    subscriptionId: "sub_123",
+    clientReferenceId: "agency_123",
+    metadata: checkoutSessionPayload().metadata,
+  }
+  assert.doesNotThrow(() => assertStripeCheckoutSessionMatchesReservation(session, reservation))
+  for (const tampered of [
+    { ...session, clientReferenceId: "other_agency" },
+    { ...session, expiresAt: session.expiresAt + 6 },
+    { ...session, metadata: { ...session.metadata, maintainflow_plan: "scale" } },
+    { ...session, metadata: { ...session.metadata, maintainflow_checkout_reservation_id: "other" } },
+    { ...session, metadata: { ...session.metadata, maintainflow_user_id: "other_user" } },
+  ]) {
+    assert.throws(
+      () => assertStripeCheckoutSessionMatchesReservation(tampered, reservation),
+      /does not match the durable workspace reservation/
+    )
   }
 })
 
@@ -473,9 +638,47 @@ test("subscription reconciliation retrieves current Stripe state server-side and
   }
 })
 
+test("Checkout Session reconciliation and expiry use current Stripe truth with the pinned API version", async () => {
+  const originalFetch = globalThis.fetch
+  const originalSecret = process.env.STRIPE_SECRET_KEY
+  const calls: Array<{ input: string | URL | Request; init?: RequestInit }> = []
+  try {
+    process.env.STRIPE_SECRET_KEY = "sk_test_checkout_truth"
+    globalThis.fetch = (async (input, init) => {
+      calls.push({ input, init })
+      const expired = String(input).endsWith("/expire")
+      return new Response(JSON.stringify(checkoutSessionPayload({
+        url: null,
+        status: expired ? "expired" : "complete",
+        subscription: "sub_123",
+        customer: "cus_123",
+      })), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+
+    const completed = await retrieveStripeCheckoutSession(" cs_test_shared ")
+    const expired = await expireStripeCheckoutSession("cs_test_shared")
+    assert.equal(completed.status, "complete")
+    assert.equal(completed.url, "")
+    assert.equal(expired.status, "expired")
+    assert.equal(String(calls[0]?.input), "https://api.stripe.com/v1/checkout/sessions/cs_test_shared")
+    assert.equal(String(calls[1]?.input), "https://api.stripe.com/v1/checkout/sessions/cs_test_shared/expire")
+    assert.equal(calls[1]?.init?.method, "POST")
+    for (const call of calls) {
+      const headers = new Headers(call.init?.headers)
+      assert.equal(headers.get("authorization"), "Bearer sk_test_checkout_truth")
+      assert.equal(headers.get("stripe-version"), stripeApiVersion)
+      assert.ok(call.init?.signal instanceof AbortSignal)
+    }
+  } finally {
+    globalThis.fetch = originalFetch
+    restoreEnv("STRIPE_SECRET_KEY", originalSecret)
+  }
+})
+
 test("webhooks reconcile mutable events from current Stripe subscription state", () => {
   const delegateSource = readFileSync("src/app/api/stripe/webhook/route.ts", "utf8")
   const source = readFileSync("src/app/api/billing/webhook/route.ts", "utf8")
+  const reconciliation = readFileSync("src/lib/billing/stripe-subscription-reconciliation.server.ts", "utf8")
 
   assert.match(delegateSource, /billing\/webhook\/route/)
   assert.match(delegateSource, /POST/)
@@ -487,25 +690,43 @@ test("webhooks reconcile mutable events from current Stripe subscription state",
   assert.match(source, /invoice\.payment_failed" \|\| event\.type === "invoice\.paid"\)[\s\S]+currentSubscription\(\{ id: subscriptionId \}\)/)
   assert.match(source, /handleCheckoutCompleted[\s\S]+currentSubscription\(\{ id: subscriptionId \}\)/)
   assert.match(source, /return retrieveStripeSubscription\(subscriptionId\)/)
-  assert.match(source, /loadAgencyBillingContractVersionByStripeReference\([\s\S]+effectiveBillingContract[\s\S]+resolveStripeSubscriptionPlanId/)
-  assert.match(source, /resolveStripeSubscriptionPlanId\(\{[\s\S]+priceId:[\s\S]+metadataPlan/)
-  assert.match(source, /entitledPlanForStripeStatus\(plan, stripeSubscriptionStatus\)/)
-  assert.match(source, /const entitledPlan = plan[\s\S]+: "free"/)
+  assert.match(source, /reconcileStripeSubscriptionSnapshot\(subscription\)/)
+  assert.match(source, /finishStripeCheckoutSession\([\s\S]+status: "complete"/)
+  assert.match(reconciliation, /loadAgencyBillingContractVersionByStripeReference\([\s\S]+effectiveBillingContract[\s\S]+resolveStripeSubscriptionPlanId/)
+  assert.match(reconciliation, /resolveStripeSubscriptionPlanId\(\{[\s\S]+priceId:[\s\S]+metadataPlan/)
+  assert.match(reconciliation, /entitledPlanForStripeStatus\(plan, stripeSubscriptionStatus\)/)
+  assert.match(reconciliation, /const entitledPlan = plan[\s\S]+: "free"/)
   assert.doesNotMatch(source, /stripeStatusGrantsPaidAccess\(stripeSubscriptionStatus\)[\s\S]+undefined/)
   assert.match(source, /plan: "free"[\s\S]+stripeSubscriptionStatus: "canceled"[\s\S]+clearSubscription: true/)
 })
 
-test("billing returns stay on Settings and poll the workspace for webhook-updated entitlement", () => {
+test("billing returns reconcile the exact Checkout Session before claiming paid access", () => {
   const settingsSource = readFileSync("src/components/app/maintainflow-screen.tsx", "utf8")
+  const businessEvalsSettingsSource = readFileSync("src/components/evals/pages/settings-pages.tsx", "utf8")
+  const reconcileRoute = readFileSync("src/app/api/billing/checkout/reconcile/route.ts", "utf8")
+  const returnService = readFileSync("src/lib/billing/stripe-checkout-return.server.ts", "utf8")
   const coreLoopSource = readFileSync("src/hooks/use-core-loop.ts", "utf8")
 
   assert.match(coreLoopSource, /const reloadWorkspace = useCallback\(async \(\) =>/)
   assert.match(coreLoopSource, /reloadWorkspace,[\s\S]+createAgency/)
-  assert.match(settingsSource, /billingReturn !== "checkout-success" && billingReturn !== "portal-return"/)
+  assert.match(settingsSource, /checkoutSessionId = searchParams\.get\("session_id"\)/)
+  assert.match(settingsSource, /reconcileStripeCheckoutFromBrowser\(\{ workspaceId, sessionId: checkoutSessionId \}\)/)
   assert.match(settingsSource, /await reloadWorkspace\(\)/)
   assert.match(settingsSource, /\[1_500, 3_000, 5_000\]/)
-  assert.match(settingsSource, /Finished checking for Stripe's latest billing status/)
-  assert.doesNotMatch(settingsSource, /Billing status has been refreshed/)
+  assert.doesNotMatch(settingsSource, /Checkout completed\. Finished checking/)
+  assert.match(businessEvalsSettingsSource, /checkoutSessionId = searchParams\.get\("session_id"\)/)
+  assert.match(businessEvalsSettingsSource, /reconcileStripeCheckoutFromBrowser\(\{ workspaceId, sessionId: checkoutSessionId \}\)/)
+  assert.match(businessEvalsSettingsSource, /await reload\(\)/)
+  assert.match(businessEvalsSettingsSource, /\[1_500, 3_000, 5_000\]/)
+  assert.doesNotMatch(businessEvalsSettingsSource, /Checkout completed\. Finished checking/)
+  assert.match(businessEvalsSettingsSource, /if \(checkoutOpeningRef\.current\) return/)
+  assert.match(businessEvalsSettingsSource, /checkoutOpeningRef\.current = true/)
+  assert.match(reconcileRoute, /loadBillingWorkspaceForToken\(token, request\.headers\.get\("x-maintainflow-workspace-id"\)\)/)
+  assert.match(reconcileRoute, /assertBillingAdmin\(workspace\)/)
+  assert.match(returnService, /loadStripeCheckoutSessionForReturn\(input\)/)
+  assert.match(returnService, /assertStripeCheckoutSessionMatchesReservation\(session, reservation\)/)
+  assert.match(returnService, /reconcileStripeSubscriptionSnapshot\(subscription/)
+  assert.match(returnService, /grantsPaidAccess \? "active" : "pending"/)
 })
 
 test("one card-free workspace trial grants Team until its fixed end, then falls back to Free", () => {
@@ -635,7 +856,11 @@ test("customer portal access requires a server-side Stripe customer link", () =>
     assert.match(portalConfigReason(null), /synced Stripe customer/)
     assert.equal(portalConfigReason("cus_123"), "")
     assert.match(portalConfigReason("cus_123", "subscription_update"), /synced subscription/)
-    assert.equal(portalConfigReason("cus_123", "subscription_update", "sub_123"), "")
+    assert.match(portalConfigReason("cus_123", "subscription_update", "sub_123", "legacy"), /grandfathered subscription/)
+    assert.equal(
+      portalConfigReason("cus_123", "subscription_update", "sub_123", businessEvalsBillingContractVersion),
+      ""
+    )
     assert.equal(isBillingPortalFlow("manage"), true)
     assert.equal(isBillingPortalFlow("subscription_update"), true)
     assert.equal(isBillingPortalFlow("cancel_immediately"), false)
@@ -674,11 +899,12 @@ test("customer portal supports standard management and a server-derived subscrip
       subscriptionId: "sub_123",
       origin: "https://www.maintainflow.io",
       flow: "subscription_update",
+      billingContractVersion: businessEvalsBillingContractVersion,
     })
 
     const manageBody = new URLSearchParams(String(calls[0]?.body))
     const updateBody = new URLSearchParams(String(calls[1]?.body))
-    const returnUrl = "https://www.maintainflow.io/settings?tab=billing&billing=portal-return"
+    const returnUrl = "https://www.maintainflow.io/settings/billing?billing=portal-return"
 
     assert.equal(manageBody.get("customer"), "cus_123")
     assert.equal(manageBody.get("configuration"), "bpc_test_portal")
@@ -707,6 +933,7 @@ test("portal route allowlists the flow and derives customer and subscription fro
   assert.match(source, /isBillingPortalFlow\(flow\)/)
   assert.match(source, /customerId: workspace\.agency\.stripeCustomerId/)
   assert.match(source, /subscriptionId: workspace\.agency\.stripeSubscriptionId/)
+  assert.match(source, /billingContractVersion: workspace\.agency\.billingContractVersion/)
   assert.doesNotMatch(source, /body\.(?:customerId|subscriptionId)/)
 })
 
@@ -741,4 +968,36 @@ test("Stripe webhooks claim and finalize a payload-bound provider receipt", () =
   assert.match(migration, /PROVIDER_WEBHOOK_EVENT_MISMATCH/)
   assert.match(migration, /receipt\.claim_token = p_claim_token/)
   assert.match(migration, /p_stale_after_seconds not between 30 and 3600/)
+})
+
+test("workspace-wide Checkout reservations are private, atomic, crash-replayable, and cross-plan safe", () => {
+  const migration = readFileSync("supabase/maintainflow_business_evals_migration.sql", "utf8")
+  const schema = readFileSync("supabase/maintainflow_schema.sql", "utf8")
+  const reservations = readFileSync("src/lib/billing/stripe-checkout-sessions.server.ts", "utf8")
+  const checkoutRoute = readFileSync("src/app/api/billing/checkout/route.ts", "utf8")
+
+  for (const source of [migration, schema]) {
+    assert.match(source, /create table if not exists public\.stripe_checkout_sessions/)
+    assert.match(source, /stripe_checkout_sessions_one_active_per_agency_uidx[\s\S]+where status in \('creating', 'open'\)/)
+    assert.match(source, /constraint stripe_checkout_sessions_agency_request_unique unique \(agency_id, idempotency_key_hash\)/)
+    assert.match(source, /create or replace function public\.reserve_stripe_checkout_session/)
+    assert.match(source, /from public\.agencies where id = p_agency_id for update/)
+    assert.match(source, /status in \('creating', 'open'\)[\s\S]+for update/)
+    assert.match(source, /encode\(digest\('stripe-checkout:' \|\| reservation_id::text, 'sha256'\), 'hex'\)/)
+    assert.match(source, /p_lifetime_seconds not between 2100 and 86400/)
+    assert.match(source, /p_lifetime_seconds \+ 300/)
+    assert.match(source, /alter table public\.stripe_checkout_sessions enable row level security/)
+    assert.match(source, /revoke all on table public\.stripe_checkout_sessions from public, anon, authenticated, service_role/)
+    assert.match(source, /grant select on table public\.stripe_checkout_sessions to service_role/)
+    assert.match(source, /grant execute on function public\.reserve_stripe_checkout_session[\s\S]+to service_role/)
+  }
+  assert.match(reservations, /createHash\("sha256"\)\.update\(input\.idempotencyKey\)/)
+  assert.match(reservations, /stripeCheckoutProviderLifetimeSeconds = 35 \* 60/)
+  assert.match(reservations, /rpc\/reserve_stripe_checkout_session/)
+  assert.match(reservations, /rpc\/record_stripe_checkout_session/)
+  assert.match(checkoutRoute, /if \(reservation\.planId !== plan \|\| reservation\.interval !== interval\)[\s\S]+replaceIncompleteCheckout/)
+  assert.equal((checkoutRoute.match(/reservation\.planId !== plan \|\| reservation\.interval !== interval/g) ?? []).length, 2)
+  assert.match(checkoutRoute, /No checkout was opened for your selection/)
+  assert.match(checkoutRoute, /planId: reservation\.planId[\s\S]+interval: reservation\.interval/)
+  assert.doesNotMatch(checkoutRoute, /createStripeCheckoutSession\(\{[\s\S]+planId: plan,/)
 })

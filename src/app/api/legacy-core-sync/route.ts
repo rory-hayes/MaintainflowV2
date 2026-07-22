@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
   try {
     const auth = await requireBusinessEvalsAuth(request, {
       featureGate: false,
-      roles: ["owner", "admin", "member"],
+      roles: ["owner", "admin"],
     })
     const input = await parseRequestJson(request, legacyCoreSyncRequestSchema)
     const result = await applyLegacyCoreSync({

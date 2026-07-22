@@ -12,6 +12,7 @@ import { dispatchEvalRun, recoverPendingEvalRunDispatches } from "@/lib/workflow
 import { purgeExpiredEvalEvidence } from "@/lib/workflows/evidence-retention.server"
 import { isBusinessEvalsRunnerEnabled } from "@/lib/features/business-evals"
 import { submittedMarkerForRun } from "@/lib/email/eval-inbound"
+import { reconcileBrowserbaseProjectUsageIfDue } from "@/lib/runner/browserbase-usage-control.server"
 
 type Row = Record<string, unknown>
 
@@ -59,6 +60,38 @@ export async function runScheduledBusinessEvals(input: { batchSize: number; leas
     }
   }
 
+  let browserUsageReconciliation
+  try {
+    browserUsageReconciliation = await reconcileBrowserbaseProjectUsageIfDue()
+  } catch (error) {
+    return {
+      paused: true,
+      pausedByBrowserUsage: true,
+      claimed: 0,
+      dispatched: 0,
+      quotaBlocked: 0,
+      failed: 0,
+      browserUsageReconciliation: {
+        error: error instanceof Error ? safeError(error.message) : "Browser provider usage reconciliation failed closed.",
+      },
+      evidenceRetention,
+      results: [] as ScheduleResult[],
+    }
+  }
+  if (!browserUsageReconciliation.state.mayCreateSession) {
+    return {
+      paused: true,
+      pausedByBrowserUsage: true,
+      claimed: 0,
+      dispatched: 0,
+      quotaBlocked: 0,
+      failed: 0,
+      browserUsageReconciliation,
+      evidenceRetention,
+      results: [] as ScheduleResult[],
+    }
+  }
+
   const workerId = `eval-scheduler:${crypto.randomUUID()}`
   const claimed = await supabaseServiceJson<ClaimedSchedule[]>("rpc/claim_due_journey_schedules", {
     method: "POST",
@@ -84,6 +117,7 @@ export async function runScheduledBusinessEvals(input: { batchSize: number; leas
     runnerPaused: results.filter((result) => result.status === "runner_paused").length,
     failed: results.filter((result) => result.status === "failed").length,
     dispatchRecovery,
+    browserUsageReconciliation,
     evidenceRetention,
     results,
   }

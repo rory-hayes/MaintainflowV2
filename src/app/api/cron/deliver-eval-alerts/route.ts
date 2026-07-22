@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { deliverPendingEvalAlerts } from "@/lib/api/alerts-delivery.server"
 import { isAuthorizedCronRequest } from "@/lib/core/cron-auth"
+import { BoundedJsonRequestError, readOptionalBoundedJson } from "@/lib/http/bounded-json.server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -11,16 +12,20 @@ export async function POST(request: NextRequest) {
   if (!isAuthorizedCronRequest(request.headers.get("authorization"), process.env.CRON_SECRET)) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
   }
-  const body = await request.json().catch(() => ({})) as Record<string, unknown>
-  const requested = Number(body.batchSize ?? process.env.ALERT_DELIVERY_BATCH_SIZE ?? 10)
-  const batchSize = Number.isFinite(requested) ? Math.max(1, Math.min(Math.floor(requested), 25)) : 10
   try {
+    const body = await readOptionalBoundedJson(request, 2_048)
+    const requested = Number(
+      (body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).batchSize : undefined)
+      ?? process.env.ALERT_DELIVERY_BATCH_SIZE
+      ?? 10,
+    )
+    const batchSize = Number.isFinite(requested) ? Math.max(1, Math.min(Math.floor(requested), 25)) : 10
     const result = await deliverPendingEvalAlerts({ batchSize })
     return NextResponse.json({ ok: true, ranAt: new Date().toISOString(), ...result })
-  } catch {
+  } catch (error) {
     return NextResponse.json(
-      { ok: false, error: "Alert deliveries could not be processed." },
-      { status: 500 }
+      { ok: false, error: error instanceof BoundedJsonRequestError ? error.message : "Alert deliveries could not be processed." },
+      { status: error instanceof BoundedJsonRequestError ? error.status : 500 }
     )
   }
 }
