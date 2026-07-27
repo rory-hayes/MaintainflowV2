@@ -26,4 +26,19 @@ test("production preview requires an exact random token and never opens on Verce
   assert.equal(isBusinessEvalsPreviewRequestAllowed({ env: { ...env, VERCEL: "1" }, presentedToken: token }), false)
   assert.equal(isBusinessEvalsPreviewRequestAllowed({ env: { ...env, VERCEL_ENV: "production" }, presentedToken: token }), false)
   assert.equal(isBusinessEvalsPreviewRequestAllowed({ env: { ...env, NEXT_PUBLIC_VERCEL_ENV: "production" }, presentedToken: token }), false)
+  assert.equal(isBusinessEvalsPreviewRequestAllowed({ env: { ...env, VERCEL: "0" }, presentedToken: token }), false)
+  assert.equal(isBusinessEvalsPreviewRequestAllowed({
+    env: {
+      ...env,
+      BUSINESS_EVALS_LOCAL_E2E_ENV_CLEARED: "1",
+      VERCEL: "0",
+      VERCEL_ENV: "0",
+      NEXT_PUBLIC_VERCEL_ENV: "0",
+    },
+    presentedToken: token,
+  }), true)
+  assert.equal(isBusinessEvalsPreviewRequestAllowed({
+    env: { ...env, BUSINESS_EVALS_LOCAL_E2E_ENV_CLEARED: "1", VERCEL: "1" },
+    presentedToken: token,
+  }), false)
 })

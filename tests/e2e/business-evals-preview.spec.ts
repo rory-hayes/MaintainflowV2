@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright"
-import { expect, test } from "@playwright/test"
+import { expect, test } from "./business-evals-test-fixture"
 
 test.describe("Business Evals preview acceptance", () => {
   test("Account signup starts with legal consent unselected and fails closed without it", async ({ page }, testInfo) => {

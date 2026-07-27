@@ -7,7 +7,12 @@ export function isBusinessEvalsPreviewRequestAllowed(input: {
   const { env } = input
   if (env.BUSINESS_EVALS_PREVIEW !== "1") return false
   if (env.NODE_ENV !== "production") return true
-  if (env.VERCEL || env.VERCEL_ENV || env.NEXT_PUBLIC_VERCEL_ENV) return false
+  const deploymentMarkers = [env.VERCEL, env.VERCEL_ENV, env.NEXT_PUBLIC_VERCEL_ENV]
+    .map((value) => value?.trim() ?? "")
+  const hasProviderDeploymentMarker = deploymentMarkers.some((value) => value !== "" && value !== "0")
+  if (hasProviderDeploymentMarker) return false
+  const hasLocalE2eTombstone = deploymentMarkers.some((value) => value === "0")
+  if (hasLocalE2eTombstone && env.BUSINESS_EVALS_LOCAL_E2E_ENV_CLEARED !== "1") return false
 
   const expected = env.BUSINESS_EVALS_E2E_PREVIEW_TOKEN?.trim() ?? ""
   const presented = input.presentedToken?.trim() ?? ""
