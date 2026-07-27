@@ -7,7 +7,7 @@ test("endpoint auth config is disabled for local auth mode", () => {
   const config = getSupabaseUserAuthConfig({
     NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE: "local",
     NEXT_PUBLIC_SUPABASE_URL: "https://maintainflow.supabase.test",
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-test-key",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "sb_publishable_test_public_key_1234567890",
   })
 
   assert.equal(config.enabled, false)
@@ -17,7 +17,7 @@ test("endpoint auth config supports branded Supabase auth URL", () => {
   const config = getSupabaseUserAuthConfig({
     NEXT_PUBLIC_SUPABASE_URL: "https://maintainflow.supabase.test",
     NEXT_PUBLIC_SUPABASE_AUTH_URL: "https://auth.maintainflow.io",
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-test-key",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "sb_publishable_test_public_key_1234567890",
   })
 
   assert.equal(config.enabled, true)
@@ -32,7 +32,7 @@ test("Supabase endpoint token verification returns the authenticated user", asyn
       enabled: true,
       supabaseUrl: "https://maintainflow.supabase.test",
       authUrl: "https://auth.maintainflow.io",
-      anonKey: "anon-test-key",
+      anonKey: "sb_publishable_test_public_key_1234567890",
     },
     (async (url, init) => {
       const headers = new Headers(init?.headers)
@@ -41,7 +41,9 @@ test("Supabase endpoint token verification returns the authenticated user", asyn
         authorization: headers.get("authorization") ?? "",
         apikey: headers.get("apikey") ?? "",
       })
-      return Response.json({ id: "user_123", email: "ops@agency.com" })
+      return String(url).endsWith("/rest/v1/rpc/current_auth_account_activation_status")
+        ? Response.json([{ activation_required: false, activation_complete: true }])
+        : Response.json({ id: "user_123", email: "ops@agency.com" })
     }) as typeof fetch
   )
 
@@ -50,9 +52,32 @@ test("Supabase endpoint token verification returns the authenticated user", asyn
     {
       url: "https://auth.maintainflow.io/auth/v1/user",
       authorization: "Bearer access-token",
-      apikey: "anon-test-key",
+      apikey: "sb_publishable_test_public_key_1234567890",
+    },
+    {
+      url: "https://maintainflow.supabase.test/rest/v1/rpc/current_auth_account_activation_status",
+      authorization: "Bearer access-token",
+      apikey: "sb_publishable_test_public_key_1234567890",
     },
   ])
+})
+
+test("Supabase endpoint token verification rejects a pending email-signup activation", async () => {
+  await assert.rejects(
+    verifySupabaseAccessToken(
+      "pending-token",
+      {
+        enabled: true,
+        supabaseUrl: "https://maintainflow.supabase.test",
+        authUrl: "https://maintainflow.supabase.test",
+        anonKey: "sb_publishable_test_public_key_1234567890",
+      },
+      (async (url) => String(url).endsWith("/auth/v1/user")
+        ? Response.json({ id: "pending-user", email: "pending@agency.com" })
+        : Response.json([{ activation_required: true, activation_complete: false }])) as typeof fetch
+    ),
+    /Confirm your email/
+  )
 })
 
 test("Supabase endpoint token verification rejects invalid sessions", async () => {
@@ -63,7 +88,7 @@ test("Supabase endpoint token verification rejects invalid sessions", async () =
         enabled: true,
         supabaseUrl: "https://maintainflow.supabase.test",
         authUrl: "https://maintainflow.supabase.test",
-        anonKey: "anon-test-key",
+        anonKey: "sb_publishable_test_public_key_1234567890",
       },
       (async () => Response.json({ msg: "JWT expired" }, { status: 401 })) as typeof fetch
     ),

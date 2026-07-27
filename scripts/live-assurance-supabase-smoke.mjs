@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs"
 
 import { currentMonthToDate } from "../src/lib/core/report-period.ts"
 import { buildReportSnapshot } from "../src/lib/core/report-state.ts"
+import { validateCredentialBearingAppOrigin } from "./lib/credential-target-policy.mjs"
+import { supabaseServiceHeaders, validateProductionSupabaseConnection } from "./lib/supabase-release-policy.mjs"
 
 const env = {
   ...readEnvFile(process.env.MAINTAINFLOW_ENV_FILE || ".env.local"),
@@ -13,7 +15,10 @@ const supabaseUrl = requiredBaseUrl("NEXT_PUBLIC_SUPABASE_URL")
 const authUrl = (env.NEXT_PUBLIC_SUPABASE_AUTH_URL || supabaseUrl).replace(/\/+$/, "")
 const anonKey = requiredEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 const serviceRoleKey = requiredEnv("SUPABASE_SERVICE_ROLE_KEY")
-const appUrl = (env.SMOKE_APP_URL || env.NEXT_PUBLIC_APP_URL || "http://localhost:3000").replace(/\/+$/, "")
+validateProductionSupabaseConnection(env)
+const appUrl = validateCredentialBearingAppOrigin(env.SMOKE_APP_URL || env.NEXT_PUBLIC_APP_URL, {
+  label: "SMOKE_APP_URL or NEXT_PUBLIC_APP_URL",
+})
 const monitorUrl = publicMonitorUrl(env.SMOKE_MONITOR_URL || env.NEXT_PUBLIC_APP_URL || appUrl)
 const expectServiceOnlyEvidence = env.EXPECT_SERVICE_ONLY_EVIDENCE !== "false"
 
@@ -702,7 +707,7 @@ function authFetch(path, options = {}) {
     method: options.method || "GET",
     headers: {
       apikey: key,
-      Authorization: `Bearer ${key}`,
+      ...(options.service ? supabaseServiceHeaders(key) : {}),
       "Content-Type": "application/json",
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
@@ -715,7 +720,11 @@ function restFetch(path, options = {}) {
     method: options.method || "GET",
     headers: {
       apikey: key,
-      Authorization: `Bearer ${options.token || key}`,
+      ...(options.token
+        ? { Authorization: `Bearer ${options.token}` }
+        : options.service
+          ? supabaseServiceHeaders(key)
+          : {}),
       "Content-Type": "application/json",
       Prefer: options.prefer || "return=representation",
     },
@@ -727,8 +736,7 @@ function storageDelete(path) {
   return fetch(`${supabaseUrl}/storage/v1/object/maintainflow-reports/${encodePath(path)}`, {
     method: "DELETE",
     headers: {
-      apikey: serviceRoleKey,
-      Authorization: `Bearer ${serviceRoleKey}`,
+      ...supabaseServiceHeaders(serviceRoleKey),
     },
   })
 }

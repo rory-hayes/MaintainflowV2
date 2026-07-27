@@ -3,6 +3,12 @@ import { createPrivateKey } from "node:crypto"
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { isIP } from "node:net"
 import { evaluateSupabaseAuthReadiness } from "./lib/auth-readiness.mjs"
+import { tryParseCanonicalPositiveSafeInteger } from "./lib/canonical-positive-integer.mjs"
+import { isConcreteEnvValue } from "./lib/env-value-policy.mjs"
+import { validateProductionSupabaseConnection } from "./lib/supabase-release-policy.mjs"
+import { isCurrentSentryOrganizationToken } from "./lib/sentry-release-policy.mjs"
+import { verifyStripeReleaseObjects } from "./lib/stripe-release-preflight.mjs"
+import { validateLegalReleaseManifest } from "./lib/legal-release-manifest.mjs"
 
 const env = {
   ...readEnvFile(".env.local"),
@@ -14,11 +20,15 @@ if (!new Set(["canary", "launch"]).has(releaseStage)) throw new Error("--stage m
 const canonicalGitRemote = "https://github.com/rory-hayes/MaintainflowV2.git"
 const canonicalVercelProject = "maintainflow-v2"
 const canonicalVercelDashboardPath = "rorys-projects-accf0d71/maintainflow-v2"
+const canonicalVercelProjectId = "prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE"
+const canonicalVercelOrgId = "team_0TBtz8vO6Cqygx11eRM5tg9D"
+const canonicalInboundDomain = "inbound.maintainflow.io"
 
 const requiredEnvKeys = [
   "NEXT_PUBLIC_APP_URL",
   "NEXT_PUBLIC_SITE_URL",
   "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_PROJECT_REF",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "DATABASE_URL",
@@ -29,6 +39,7 @@ const requiredEnvKeys = [
 
 const optionalEnvKeys = [
   "MAINTAINFLOW_MIGRATION_PHASE",
+  "NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
   "NEXT_PUBLIC_EMAIL_PASSWORD_AUTH_ENABLED",
@@ -70,6 +81,7 @@ const optionalEnvKeys = [
   "BUSINESS_EVALS_SCHEDULER_KILL_SWITCH",
   "BUSINESS_EVALS_SCHEDULER_BATCH_SIZE",
   "BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS",
+  "BROWSER_CONTEXT_CLEANUP_BATCH_SIZE",
   "BUSINESS_EVALS_FIXTURES_ENABLED",
   "BUSINESS_EVALS_FIXTURE_FROM_EMAIL",
   "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET",
@@ -78,11 +90,19 @@ const optionalEnvKeys = [
   "BROWSERBASE_API_KEY",
   "BROWSERBASE_PROJECT_ID",
   "BROWSERBASE_EGRESS_PROXY_SERVER",
-  "BROWSERBASE_EGRESS_PROXY_USERNAME",
-  "BROWSERBASE_EGRESS_PROXY_PASSWORD",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64",
+  "BROWSERBASE_EGRESS_PROXY_AUDIENCE",
+  "BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID",
+  "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT",
+  "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT",
+  "BROWSERBASE_USAGE_WARNING_PERCENT",
+  "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS",
+  "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES",
   "RESEND_API_KEY",
   "RESEND_INBOUND_WEBHOOK_SECRET",
   "EVAL_INBOUND_DOMAIN",
+  "EVAL_SYNTHETIC_EMAIL_DOMAIN",
   "EVAL_EMAIL_ROUTING_SECRET",
   "EVAL_EMAIL_LINK_ENCRYPTION_KEY_BASE64",
   "EVAL_CLEANUP_SIGNING_PRIVATE_KEY_BASE64",
@@ -95,6 +115,11 @@ const optionalEnvKeys = [
   "STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID",
   "STRIPE_CUSTOMER_PORTAL_ENABLED",
   "NEXT_PUBLIC_SENTRY_DSN",
+  "SENTRY_AUTH_TOKEN",
+  "SENTRY_ORG",
+  "SENTRY_PROJECT",
+  "MAINTAINFLOW_LEGAL_RELEASE_MANIFEST_PATH",
+  "RELEASE_CI_RUN_URL",
 ]
 
 const results = []
@@ -106,12 +131,16 @@ checkFile("supabase/maintainflow_scheduler_verify.sql", "Supabase scheduler veri
 checkFile("scripts/push-vercel-env.mjs", "Vercel env push helper exists")
 
 checkRequiredEnv()
+checkRetiredProductionEnv()
 checkSupabaseUrl()
+checkSupabaseCredentialRoles()
 checkSupabaseAuthReadiness()
 checkInfrastructurePlanReadiness()
 checkCronSettings()
 checkBusinessEvalsProviderEnv()
 checkStripeBillingEnv()
+await checkStripeProviderPreflight()
+checkObservabilityEnv()
 checkCommand("git", ["--version"], "Git is available")
 const ghAvailable = checkCommand("gh", ["--version"], "GitHub CLI is available", { optional: true })
 if (ghAvailable) checkGhAuth()
@@ -123,6 +152,7 @@ checkGitRemote()
 checkVercelProjectLink()
 checkEnvIgnored()
 checkGitMetadataWritable()
+await checkLegalReleaseAndCommitEvidence()
 
 for (const result of results) {
   console.log(`${result.level.padEnd(5)} ${result.message}`)
@@ -146,7 +176,7 @@ function checkFile(path, message) {
 
 function checkEnvironmentSource() {
   const localEnvExists = existsSync(".env.local")
-  const requiredEnvironmentInjected = requiredEnvKeys.every((key) => Boolean(process.env[key]))
+  const requiredEnvironmentInjected = requiredEnvKeys.every((key) => isConcreteEnvValue(process.env[key]))
   add(
     localEnvExists || requiredEnvironmentInjected ? "OK" : "BLOCK",
     localEnvExists
@@ -158,11 +188,65 @@ function checkEnvironmentSource() {
 }
 
 function checkRequiredEnv() {
-  const missing = requiredEnvKeys.filter((key) => !env[key])
+  const missing = requiredEnvKeys.filter((key) => !isConcreteEnvValue(env[key]))
   add(missing.length ? "BLOCK" : "OK", missing.length ? `Missing required env keys: ${missing.join(", ")}` : "Required deployment env keys are present")
 
-  const presentOptional = optionalEnvKeys.filter((key) => env[key])
+  const presentOptional = optionalEnvKeys.filter((key) => isConcreteEnvValue(env[key]))
   add("OK", `Optional provider env keys present: ${presentOptional.length ? presentOptional.join(", ") : "none"}`)
+}
+
+function checkRetiredProductionEnv() {
+  const localAuthMode = (env.NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE || "").trim()
+  add(
+    localAuthMode ? "BLOCK" : "OK",
+    localAuthMode
+      ? "NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE is local-development-only and must be absent from a production release"
+      : "The retired local-auth override is absent from the production release"
+  )
+}
+
+function checkObservabilityEnv() {
+  const required = ["NEXT_PUBLIC_SENTRY_DSN", "SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_PROJECT"]
+  const missing = required.filter((key) => !isConcreteEnvValue(env[key]))
+  add(
+    missing.length ? "BLOCK" : "OK",
+    missing.length
+      ? `Production error monitoring is incomplete: ${missing.join(", ")}`
+      : "Client and server error monitoring configuration is present"
+  )
+  if (env.NEXT_PUBLIC_SENTRY_DSN) {
+    add(
+      isCanonicalSentryDsn(env.NEXT_PUBLIC_SENTRY_DSN) ? "OK" : "BLOCK",
+      "NEXT_PUBLIC_SENTRY_DSN is a public-key-only Sentry ingest DSN"
+    )
+  }
+  if (env.SENTRY_AUTH_TOKEN) {
+    add(isCurrentSentryOrganizationToken(env.SENTRY_AUTH_TOKEN) ? "OK" : "BLOCK", "SENTRY_AUTH_TOKEN has current organization-token structure")
+  }
+  for (const key of ["SENTRY_ORG", "SENTRY_PROJECT"]) {
+    if (env[key]) add(/^[a-z0-9][a-z0-9-]{1,62}$/.test(env[key].trim()) ? "OK" : "BLOCK", `${key} is a safe Sentry slug`)
+  }
+  add(
+    !env.SENTRY_URL ? "OK" : "BLOCK",
+    env.SENTRY_URL
+      ? "SENTRY_URL must be absent; the source-map upload host is pinned to https://sentry.io"
+      : "The source-map upload host is pinned in code and cannot be redirected by SENTRY_URL"
+  )
+}
+
+function isCanonicalSentryDsn(value) {
+  try {
+    const url = new URL(String(value).trim())
+    return url.protocol === "https:"
+      && Boolean(url.username)
+      && !url.password
+      && (url.hostname === "sentry.io" || url.hostname.endsWith(".sentry.io"))
+      && /^\/\d+\/?$/.test(url.pathname)
+      && !url.search
+      && !url.hash
+  } catch {
+    return false
+  }
 }
 
 function checkSupabaseUrl() {
@@ -188,6 +272,15 @@ function checkSupabaseUrl() {
   }
 
   add(supabaseAuthUrl.startsWith("https://") ? "OK" : "BLOCK", "NEXT_PUBLIC_SUPABASE_AUTH_URL uses an HTTPS auth base URL")
+}
+
+function checkSupabaseCredentialRoles() {
+  try {
+    validateProductionSupabaseConnection(env)
+    add("OK", "Supabase origins are pinned and publishable/server key roles are separated")
+  } catch (error) {
+    add("BLOCK", error instanceof Error ? error.message : "Supabase origin and key-role validation failed")
+  }
 }
 
 function checkSupabaseAuthReadiness() {
@@ -231,8 +324,15 @@ function checkBusinessEvalsProviderEnv() {
     "BROWSERBASE_API_KEY",
     "BROWSERBASE_PROJECT_ID",
     "BROWSERBASE_EGRESS_PROXY_SERVER",
-    "BROWSERBASE_EGRESS_PROXY_USERNAME",
-    "BROWSERBASE_EGRESS_PROXY_PASSWORD",
+    "BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID",
+    "BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64",
+    "BROWSERBASE_EGRESS_PROXY_AUDIENCE",
+    "BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID",
+    "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT",
+    "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT",
+    "BROWSERBASE_USAGE_WARNING_PERCENT",
+    "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS",
+    "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES",
     "RESEND_API_KEY",
     "RESEND_INBOUND_WEBHOOK_SECRET",
     "EVAL_INBOUND_DOMAIN",
@@ -245,8 +345,9 @@ function checkBusinessEvalsProviderEnv() {
     "ALERT_ENDPOINT_ENCRYPTION_KEY",
     "MAINTAINFLOW_ALERT_FROM_EMAIL",
     "ALERT_DELIVERY_BATCH_SIZE",
+    "BROWSER_CONTEXT_CLEANUP_BATCH_SIZE",
   ]
-  const missing = required.filter((key) => !env[key])
+  const missing = required.filter((key) => !isConcreteEnvValue(env[key]))
   add(
     missing.length ? "BLOCK" : "OK",
     missing.length ? `Business Evals production providers are incomplete: ${missing.join(", ")}` : "Business Evals production provider keys are present"
@@ -266,17 +367,79 @@ function checkBusinessEvalsProviderEnv() {
     )
   }
   for (const key of ["RESEND_INBOUND_WEBHOOK_SECRET", "EVAL_EMAIL_ROUTING_SECRET", "REPORT_SHARE_TOKEN_PEPPER", "RUN_LOG_KEY_PEPPER", "ALERT_ENDPOINT_ENCRYPTION_KEY"]) {
-    if (env[key]) add(env[key].trim().length >= 32 ? "OK" : "BLOCK", `${key} contains at least 32 characters`)
+    if (isConcreteEnvValue(env[key])) add(env[key].trim().length >= 32 ? "OK" : "BLOCK", `${key} contains at least 32 characters`)
   }
   if (env.EVAL_CLEANUP_SIGNING_PRIVATE_KEY_BASE64 || env.EVAL_CLEANUP_SIGNING_KEY_ID) {
     for (const result of validateCleanupSigningKey(env)) add(result.level, result.message)
   }
   if (env.EVAL_INBOUND_DOMAIN) {
-    add(isPublicHostname(env.EVAL_INBOUND_DOMAIN) ? "OK" : "BLOCK", "EVAL_INBOUND_DOMAIN is a public DNS hostname")
+    const inboundDomain = normalizeHostname(env.EVAL_INBOUND_DOMAIN)
+    add(
+      inboundDomain === canonicalInboundDomain ? "OK" : "BLOCK",
+      inboundDomain === canonicalInboundDomain
+        ? `EVAL_INBOUND_DOMAIN is the dedicated ${canonicalInboundDomain} receiving domain`
+        : `EVAL_INBOUND_DOMAIN must be exactly ${canonicalInboundDomain}`
+    )
+  }
+  if (env.EVAL_SYNTHETIC_EMAIL_DOMAIN) {
+    const syntheticDomain = normalizeHostname(env.EVAL_SYNTHETIC_EMAIL_DOMAIN)
+    const syntheticDomainAllowed = syntheticDomain === "example.invalid" || syntheticDomain === canonicalInboundDomain
+    add(
+      syntheticDomainAllowed ? "OK" : "BLOCK",
+      syntheticDomainAllowed
+        ? "EVAL_SYNTHETIC_EMAIL_DOMAIN uses the reserved sink or the owned inbound domain"
+        : `EVAL_SYNTHETIC_EMAIL_DOMAIN must be example.invalid or ${canonicalInboundDomain}`
+    )
   }
   if (env.MAINTAINFLOW_ALERT_FROM_EMAIL) {
     add(/^[^\s@]+@maintainflow\.io$/i.test(env.MAINTAINFLOW_ALERT_FROM_EMAIL.trim()) ? "OK" : "BLOCK", "MAINTAINFLOW_ALERT_FROM_EMAIL uses a verified @maintainflow.io sender")
   }
+  if (env.BROWSERBASE_PROJECT_ID) {
+    add(
+      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(env.BROWSERBASE_PROJECT_ID.trim()) ? "OK" : "BLOCK",
+      "BROWSERBASE_PROJECT_ID identifies one structurally safe Browserbase project"
+    )
+  }
+  const browserMinutesLimit = tryParseCanonicalPositiveSafeInteger(
+    env.BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT,
+    "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT"
+  )
+  const proxyBytesLimit = tryParseCanonicalPositiveSafeInteger(
+    env.BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT,
+    "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT"
+  )
+  const usageWarningPercent = tryParseCanonicalPositiveSafeInteger(
+    env.BROWSERBASE_USAGE_WARNING_PERCENT,
+    "BROWSERBASE_USAGE_WARNING_PERCENT"
+  )
+  const meteringMaxAttempts = tryParseCanonicalPositiveSafeInteger(
+    env.BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS,
+    "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS"
+  )
+  const meteringMaxAgeMinutes = tryParseCanonicalPositiveSafeInteger(
+    env.BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES,
+    "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES"
+  )
+  add(
+    browserMinutesLimit !== null ? "OK" : "BLOCK",
+    "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT is an explicit positive integer commercial ceiling"
+  )
+  add(
+    proxyBytesLimit !== null ? "OK" : "BLOCK",
+    "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT is an explicit positive integer commercial ceiling"
+  )
+  add(
+    usageWarningPercent !== null && usageWarningPercent >= 50 && usageWarningPercent <= 95 ? "OK" : "BLOCK",
+    "BROWSERBASE_USAGE_WARNING_PERCENT is between 50 and 95"
+  )
+  add(
+    meteringMaxAttempts !== null && meteringMaxAttempts >= 3 && meteringMaxAttempts <= 100 ? "OK" : "BLOCK",
+    "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS is between 3 and 100"
+  )
+  add(
+    meteringMaxAgeMinutes !== null && meteringMaxAgeMinutes >= 15 && meteringMaxAgeMinutes <= 1440 ? "OK" : "BLOCK",
+    "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES is between 15 and 1440"
+  )
   if (!missing.some((key) => key.startsWith("BROWSERBASE_EGRESS_PROXY_"))) {
     for (const result of validateBrowserbaseEgressProxy(env)) add(result.level, result.message)
   }
@@ -311,12 +474,19 @@ function checkBusinessEvalsProviderEnv() {
   const schedulerBatch = Number(env.BUSINESS_EVALS_SCHEDULER_BATCH_SIZE)
   const schedulerLease = Number(env.BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS)
   const alertBatch = Number(env.ALERT_DELIVERY_BATCH_SIZE)
+  const contextCleanupBatch = Number(env.BROWSER_CONTEXT_CLEANUP_BATCH_SIZE)
   const schedulerBatchValid = Number.isInteger(schedulerBatch) && schedulerBatch >= 1 && schedulerBatch <= 25
   const schedulerLeaseValid = Number.isInteger(schedulerLease) && schedulerLease >= 120 && schedulerLease <= 900
   const alertBatchValid = Number.isInteger(alertBatch) && alertBatch >= 1 && alertBatch <= 100
+  const contextCleanupBatchValid = Number.isInteger(contextCleanupBatch) && contextCleanupBatch >= 1 && contextCleanupBatch <= 4
   add(schedulerBatchValid ? "OK" : "BLOCK", schedulerBatchValid ? "Business Evals scheduler batch size is between 1 and 25" : "BUSINESS_EVALS_SCHEDULER_BATCH_SIZE must be between 1 and 25")
   add(schedulerLeaseValid ? "OK" : "BLOCK", schedulerLeaseValid ? "Business Evals scheduler lease is between 120 and 900 seconds" : "BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS must be between 120 and 900 seconds")
   add(alertBatchValid ? "OK" : "BLOCK", alertBatchValid ? "Alert delivery batch size is between 1 and 100" : "ALERT_DELIVERY_BATCH_SIZE must be between 1 and 100")
+  add(contextCleanupBatchValid ? "OK" : "BLOCK", contextCleanupBatchValid ? "Browser Context cleanup batch size is between 1 and 4" : "BROWSER_CONTEXT_CLEANUP_BATCH_SIZE must be between 1 and 4")
+}
+
+function normalizeHostname(value) {
+  return String(value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "")
 }
 
 function isExactBase64Key(value, expectedBytes) {
@@ -339,7 +509,7 @@ function validateBrowserbaseEgressProxy(values) {
   const hostname = proxyUrl.hostname.toLowerCase()
   const unbracketedHostname = hostname.replace(/^\[|\]$/g, "")
   const reservedSuffixes = [".localhost", ".local", ".internal", ".home", ".lan", ".test", ".invalid", ".onion"]
-  const originOnly = proxyUrl.pathname === "/" && !proxyUrl.search && !proxyUrl.hash
+  const originOnly = proxyUrl.pathname === "/" && !proxyUrl.search && !proxyUrl.hash && !proxyUrl.port
   const publicHostname = hostname
     && hostname.includes(".")
     && hostname !== "localhost"
@@ -347,16 +517,32 @@ function validateBrowserbaseEgressProxy(values) {
     && !isIP(unbracketedHostname)
   results.push({
     level: proxyUrl.protocol === "https:" && !proxyUrl.username && !proxyUrl.password && originOnly && publicHostname ? "OK" : "BLOCK",
-    message: "Browserbase egress proxy is a credential-free HTTPS origin on a public DNS hostname",
+    message: "Browserbase egress proxy is a credential-free HTTPS origin on port 443 with a public DNS hostname",
+  })
+  const signingKeyId = (values.BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID || "").trim()
+  results.push({
+    level: /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(signingKeyId) ? "OK" : "BLOCK",
+    message: "Browserbase egress proxy signing key ID is structurally safe",
   })
   results.push({
-    level: /^\S{1,256}$/.test((values.BROWSERBASE_EGRESS_PROXY_USERNAME || "").trim()) ? "OK" : "BLOCK",
-    message: "Browserbase egress proxy username is present and structurally safe",
+    level: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test((values.BROWSERBASE_EGRESS_PROXY_AUDIENCE || "").trim()) ? "OK" : "BLOCK",
+    message: "Browserbase egress proxy credential audience is structurally safe",
   })
-  const passwordLength = (values.BROWSERBASE_EGRESS_PROXY_PASSWORD || "").trim().length
+  try {
+    const encoded = (values.BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64 || "").trim()
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error("invalid base64")
+    const signingKey = createPrivateKey({ key: Buffer.from(encoded, "base64"), format: "der", type: "pkcs8" })
+    results.push({
+      level: signingKey.asymmetricKeyType === "ed25519" ? "OK" : "BLOCK",
+      message: "Browserbase egress proxy signing key is a PKCS#8 Ed25519 private key",
+    })
+  } catch {
+    results.push({ level: "BLOCK", message: "Browserbase egress proxy signing key is a PKCS#8 Ed25519 private key" })
+  }
+  const caCertificateId = (values.BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID || "").trim()
   results.push({
-    level: passwordLength >= 16 && passwordLength <= 1_024 ? "OK" : "BLOCK",
-    message: "Browserbase egress proxy password meets the 16-character minimum",
+    level: caCertificateId.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(caCertificateId) ? "OK" : "BLOCK",
+    message: "Browserbase egress proxy has one structurally safe public CA certificate ID",
   })
   return results
 }
@@ -380,16 +566,6 @@ function validateCleanupSigningKey(values) {
   return results
 }
 
-function isPublicHostname(value) {
-  const hostname = String(value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "")
-  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(hostname)
-    && !hostname.endsWith(".localhost")
-    && !hostname.endsWith(".local")
-    && !hostname.endsWith(".internal")
-    && !hostname.endsWith(".test")
-    && !hostname.endsWith(".invalid")
-}
-
 function checkStripeBillingEnv() {
   const portalConfigurationId = (env.STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID || "").trim()
   const requiredStripeBillingKeys = [
@@ -402,8 +578,8 @@ function checkStripeBillingEnv() {
     "STRIPE_PRICE_TEAM_ANNUAL",
     "STRIPE_PRICE_AGENCY_ANNUAL",
   ]
-  const present = requiredStripeBillingKeys.filter((key) => env[key])
-  const missing = requiredStripeBillingKeys.filter((key) => !env[key])
+  const present = requiredStripeBillingKeys.filter((key) => isConcreteEnvValue(env[key]))
+  const missing = requiredStripeBillingKeys.filter((key) => !isConcreteEnvValue(env[key]))
 
   if (!present.length) {
     add("BLOCK", "Stripe billing env keys are required for the self-serve production release")
@@ -416,7 +592,7 @@ function checkStripeBillingEnv() {
       ? `Stripe billing env is partial; missing ${missing.join(", ")}`
       : "Stripe billing env keys are present"
   )
-  const annualPricesComplete = ["STRIPE_PRICE_SOLO_ANNUAL", "STRIPE_PRICE_TEAM_ANNUAL", "STRIPE_PRICE_AGENCY_ANNUAL"].every((key) => Boolean(env[key]))
+  const annualPricesComplete = ["STRIPE_PRICE_SOLO_ANNUAL", "STRIPE_PRICE_TEAM_ANNUAL", "STRIPE_PRICE_AGENCY_ANNUAL"].every((key) => isConcreteEnvValue(env[key]))
   add(annualPricesComplete ? "OK" : "BLOCK", annualPricesComplete ? "Stable annual Stripe Prices are configured for every public paid plan" : "Stable annual Stripe Prices must be configured for every public paid plan")
   add(
     env.STRIPE_CUSTOMER_PORTAL_ENABLED === "true" ? "OK" : "BLOCK",
@@ -431,6 +607,24 @@ function checkStripeBillingEnv() {
       : "STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID must identify the verified portal configuration"
   )
   for (const result of validateStripeReleaseValues(env, releaseStage)) add(result.level, result.message)
+}
+
+async function checkStripeProviderPreflight() {
+  const required = [
+    "STRIPE_SECRET_KEY",
+    "STRIPE_PRICE_SOLO",
+    "STRIPE_PRICE_TEAM",
+    "STRIPE_PRICE_AGENCY",
+    "STRIPE_PRICE_SOLO_ANNUAL",
+    "STRIPE_PRICE_TEAM_ANNUAL",
+    "STRIPE_PRICE_AGENCY_ANNUAL",
+    "STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID",
+  ]
+  if (required.some((key) => !isConcreteEnvValue(env[key]))) return
+
+  for (const result of await verifyStripeReleaseObjects(env, { stage: releaseStage })) {
+    add(result.level, result.message)
+  }
 }
 
 function validateStripeReleaseValues(values, stage) {
@@ -533,11 +727,14 @@ function checkVercelProjectLink() {
 
   try {
     const project = JSON.parse(readFileSync(projectFile, "utf8"))
+    const isCanonicalProject = project.projectName === canonicalVercelProject
+      && project.projectId === canonicalVercelProjectId
+      && project.orgId === canonicalVercelOrgId
     add(
-      project.projectName === canonicalVercelProject ? "OK" : "BLOCK",
-      project.projectName === canonicalVercelProject
+      isCanonicalProject ? "OK" : "BLOCK",
+      isCanonicalProject
         ? `Vercel project link targets ${canonicalVercelDashboardPath}`
-        : `Vercel project link must target ${canonicalVercelDashboardPath}; found ${project.projectName || "missing"}`
+        : `Vercel project link must match ${canonicalVercelDashboardPath} (${canonicalVercelProjectId}, ${canonicalVercelOrgId}); found ${project.projectName || "missing"} (${project.projectId || "missing"}, ${project.orgId || "missing"})`
     )
   } catch {
     add("BLOCK", `${projectFile} is not valid Vercel project metadata for ${canonicalVercelDashboardPath}`)
@@ -559,6 +756,72 @@ function checkGitMetadataWritable() {
   } catch {
     add("WARN", ".git metadata is not writable in this session; staging and committing may require a less restricted shell")
   }
+}
+
+async function checkLegalReleaseAndCommitEvidence() {
+  if (releaseStage !== "launch") {
+    add("WARN", "Canary readiness does not authorize public checkout or canonical-domain cutover without the legal release manifest")
+    return
+  }
+
+  const branch = gitOutput(["branch", "--show-current"])
+  const head = gitOutput(["rev-parse", "HEAD"])
+  const clean = gitOutput(["status", "--porcelain"]) === ""
+  add(branch === "main" ? "OK" : "BLOCK", "Launch release is checked from the canonical main branch")
+  add(clean ? "OK" : "BLOCK", "Launch release worktree is clean and exactly reviewable")
+
+  const fetched = spawnSync("git", ["fetch", "--quiet", "origin", "main"], { encoding: "utf8" })
+  const originMain = fetched.status === 0 ? gitOutput(["rev-parse", "origin/main"]) : ""
+  add(
+    fetched.status === 0 && Boolean(head) && head === originMain ? "OK" : "BLOCK",
+    "Launch commit exactly matches freshly fetched origin/main",
+  )
+
+  const manifestPath = String(env.MAINTAINFLOW_LEGAL_RELEASE_MANIFEST_PATH || "").trim()
+  if (!manifestPath || !existsSync(manifestPath)) {
+    add("BLOCK", "A reviewed ignored legal release manifest is required before public checkout or domain cutover")
+  } else {
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+      for (const result of validateLegalReleaseManifest(manifest, head)) add(result.level, result.message)
+    } catch {
+      add("BLOCK", "The legal release manifest must be valid JSON matching the reviewed schema")
+    }
+  }
+
+  const ciUrl = String(env.RELEASE_CI_RUN_URL || "").trim()
+  const match = ciUrl.match(/^https:\/\/github\.com\/rory-hayes\/MaintainflowV2\/actions\/runs\/(\d+)(?:\/.*)?$/)
+  if (!match) {
+    add("BLOCK", "RELEASE_CI_RUN_URL must identify the successful GitHub Actions run for the exact release commit")
+    return
+  }
+  const run = spawnSync("gh", [
+    "run", "view", match[1],
+    "--repo", "rory-hayes/MaintainflowV2",
+    "--json", "headSha,headBranch,status,conclusion,url",
+  ], { encoding: "utf8" })
+  try {
+    const evidence = run.status === 0 ? JSON.parse(run.stdout) : null
+    const canonicalCiUrl = `https://github.com/rory-hayes/MaintainflowV2/actions/runs/${match[1]}`
+    add(
+      evidence?.headSha === head
+        && evidence?.headBranch === "main"
+        && evidence?.status === "completed"
+        && evidence?.conclusion === "success"
+        && evidence?.url === canonicalCiUrl
+        && ciUrl.startsWith(canonicalCiUrl)
+        ? "OK"
+        : "BLOCK",
+      "GitHub Actions completed successfully for the exact release commit",
+    )
+  } catch {
+    add("BLOCK", "GitHub Actions evidence could not be verified for the exact release commit")
+  }
+}
+
+function gitOutput(args) {
+  const result = spawnSync("git", args, { encoding: "utf8" })
+  return result.status === 0 ? result.stdout.trim() : ""
 }
 
 function add(level, message) {

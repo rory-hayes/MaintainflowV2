@@ -1,5 +1,6 @@
 import { createFixedWindowRateLimiter } from "@/lib/core/rate-limit"
 import { scanUrlSuggestions } from "@/lib/core/url-scan"
+import { BoundedJsonRequestError, readBoundedJson } from "@/lib/http/bounded-json.server"
 import { bearerToken } from "@/lib/supabase/report-download.server"
 import { getSupabaseUserAuthConfig, verifySupabaseAccessToken } from "@/lib/supabase/user-auth"
 import { NextRequest, NextResponse } from "next/server"
@@ -25,7 +26,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const body = await request.json()
+    const body = await readBoundedJson(request, 8_192) as Record<string, unknown>
     const result = await scanUrlSuggestions({
       clientName: String(body?.clientName ?? ""),
       websiteUrl: String(body?.websiteUrl ?? ""),
@@ -39,7 +40,7 @@ export async function POST(request: NextRequest) {
         suggestions: [],
         warnings: [error instanceof Error ? error.message : "URL scan failed."],
       },
-      { status: 400 }
+      { status: error instanceof BoundedJsonRequestError ? error.status : 400 }
     )
   }
 }

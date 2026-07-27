@@ -1,0 +1,52 @@
+# Deployment template only. The app name must be replaced after an approved
+# Fly organization, region, and public hostname have been selected.
+app = "replace-with-reviewed-interceptor-app"
+primary_region = "fra"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "infra/browser-egress-proxy/deploy/images/Dockerfile.interceptor"
+
+[env]
+  MF_POLICY_VERSION = "browser-egress-2026-01"
+  MF_PROXY_AUDIENCE = "maintainflow-browser-egress"
+  MF_DIALER_SERVER_NAME = "replace-with-reviewed-dialer-app.internal"
+  MF_DIALER_PROXY_URL = "https://replace-with-reviewed-dialer-app.internal:9443"
+  MF_DIALER_CLIENT_SPIFFE_ID = "spiffe://maintainflow/interceptor"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 0
+
+  [services.concurrency]
+    type = "connections"
+    soft_limit = 20
+    hard_limit = 40
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls"]
+
+    [services.ports.tls_options]
+      alpn = ["http/1.1"]
+      versions = ["TLSv1.2", "TLSv1.3"]
+      default_self_signed = false
+
+  [[services.tcp_checks]]
+    grace_period = "10s"
+    interval = "15s"
+    timeout = "2s"
+
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
+  persist_rootfs = "never"

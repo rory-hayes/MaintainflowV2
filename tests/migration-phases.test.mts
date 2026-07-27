@@ -19,6 +19,14 @@ const schedulerCapacityContractMigration = readFileSync(
   "supabase/maintainflow_scheduler_capacity_contract_migration.sql",
   "utf8",
 )
+const browserContextCleanupSchedulerMigration = readFileSync(
+  "supabase/maintainflow_browser_context_cleanup_scheduler_migration.sql",
+  "utf8",
+)
+const browserProviderCostControlsMigration = readFileSync(
+  "supabase/maintainflow_browser_provider_cost_controls_migration.sql",
+  "utf8",
+)
 const deployReadiness = readFileSync("scripts/local-deploy-readiness.mjs", "utf8")
 const envPublisher = readFileSync("scripts/push-vercel-env.mjs", "utf8")
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
@@ -62,6 +70,8 @@ test("postbuild defaults to expand and gates assurance and paid-pilot contractio
   assert.match(migrationRunner, /maintainflow_atomic_check_evidence_migration\.sql/)
   assert.match(migrationRunner, /maintainflow_scheduler_capacity_migration\.sql/)
   assert.match(migrationRunner, /maintainflow_business_evals_migration\.sql/)
+  assert.match(migrationRunner, /maintainflow_browser_context_cleanup_scheduler_migration\.sql/)
+  assert.match(migrationRunner, /maintainflow_browser_provider_cost_controls_migration\.sql/)
   assert.match(migrationRunner, /maintainflow_scheduler_capacity_contract_migration\.sql/)
   assert.match(migrationRunner, /maintainflow_service_evidence_rls_contract_migration\.sql/)
   assert.match(migrationRunner, /maintainflow_public_monitor_contract_migration\.sql/)
@@ -107,7 +117,17 @@ test("postbuild defaults to expand and gates assurance and paid-pilot contractio
   )
   assertOrdered(
     migrationRunner,
+    "withoutTransactionWrapper(browserContextCleanupSchedulerMigration)",
+    "withoutTransactionWrapper(browserProviderCostControlsMigration)",
+  )
+  assertOrdered(
+    migrationRunner,
     "withoutTransactionWrapper(businessEvalsMigration)",
+    "withoutTransactionWrapper(browserContextCleanupSchedulerMigration)",
+  )
+  assertOrdered(
+    migrationRunner,
+    "withoutTransactionWrapper(browserContextCleanupSchedulerMigration)",
     "withoutTransactionWrapper(assuranceIntegrityMigration)",
   )
   assert.match(migrationRunner, /business_evals_foundation_ready/)
@@ -136,6 +156,22 @@ test("postbuild defaults to expand and gates assurance and paid-pilot contractio
   )
 })
 
+test("browser provider accounting migration is additive, private, and service mediated", () => {
+  assert.match(browserProviderCostControlsMigration, /create table if not exists public\.browser_provider_cost_controls/)
+  assert.match(browserProviderCostControlsMigration, /create table if not exists public\.browser_provider_session_usage/)
+  assert.match(browserProviderCostControlsMigration, /create table if not exists public\.browser_provider_usage_snapshots/)
+  assert.match(browserProviderCostControlsMigration, /create table if not exists public\.browser_provider_session_metering_queue/)
+  assert.match(browserProviderCostControlsMigration, /create table if not exists public\.browser_provider_session_creation_intents/)
+  assert.match(browserProviderCostControlsMigration, /provider_counter_decreased/)
+  assert.match(browserProviderCostControlsMigration, /grant execute on function public\.record_browser_provider_session_usage/)
+  assert.match(browserProviderCostControlsMigration, /grant execute on function public\.claim_browser_provider_session_metering/)
+  assert.match(browserProviderCostControlsMigration, /grant execute on function public\.defer_browser_provider_session_metering/)
+  assert.match(browserProviderCostControlsMigration, /grant execute on function public\.reopen_browser_provider_session_metering/)
+  assert.match(browserProviderCostControlsMigration, /grant execute on function public\.reopen_browser_provider_session_creation_reconciliation/)
+  assert.match(browserProviderCostControlsMigration, /revoke all on function public\.queue_browser_provider_session_metering[\s\S]*service_role/)
+  assert.doesNotMatch(browserProviderCostControlsMigration, /drop table|truncate table/i)
+})
+
 test("scheduler capacity expansion preserves installed credentials and enforces the launch envelope", () => {
   assert.match(schedulerCapacityMigration, /to_regclass\('cron\.job'\)/)
   assert.match(schedulerCapacityMigration, /select command[\s\S]+jobname = 'maintainflow-run-checks'/)
@@ -160,6 +196,25 @@ test("scheduler capacity activates five-check waves only in contract phase", () 
     "withoutTransactionWrapper(schedulerCapacityMigration)",
     "withoutTransactionWrapper(schedulerCapacityContractMigration)",
   )
+})
+
+test("Browser Context cleanup scheduling is additive in both rollout phases", () => {
+  assert.match(browserContextCleanupSchedulerMigration, /to_regclass\('cron\.job'\)/)
+  assert.match(browserContextCleanupSchedulerMigration, /jobname = 'maintainflow-run-evals'/)
+  assert.match(browserContextCleanupSchedulerMigration, /\/api\/cron\/cleanup-browser-contexts/)
+  assert.match(browserContextCleanupSchedulerMigration, /'''batchSize'', 4/)
+  assert.match(browserContextCleanupSchedulerMigration, /timeout_milliseconds := 60000/)
+  assert.match(browserContextCleanupSchedulerMigration, /cron\.schedule\(\s*'maintainflow-cleanup-browser-contexts'/)
+  assert.doesNotMatch(browserContextCleanupSchedulerMigration, /cron\.unschedule\('maintainflow-run-evals'\)/)
+  assert.doesNotMatch(browserContextCleanupSchedulerMigration, /delete\s+from|truncate\s+|drop\s+table|alter\s+table/i)
+  assert.equal(
+    (migrationRunner.match(/withoutTransactionWrapper\(browserContextCleanupSchedulerMigration\)/g) ?? []).length,
+    1,
+  )
+  assert.match(migrationRunner, /browser_context_cleanup_scheduler_ready/)
+  assert.match(migrationRunner, /business_evals_scheduler_ready/)
+  assert.match(migrationRunner, /jobname = 'maintainflow-cleanup-browser-contexts'/)
+  assert.match(migrationRunner, /jobname = 'maintainflow-run-evals'/)
 })
 
 test("both rollout phases erase response-derived assertion and result evidence", () => {

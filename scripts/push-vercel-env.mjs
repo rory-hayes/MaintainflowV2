@@ -3,6 +3,10 @@ import { createPrivateKey } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { isIP } from "node:net"
 import { evaluateSupabaseAuthReadiness } from "./lib/auth-readiness.mjs"
+import { parseCanonicalPositiveSafeInteger } from "./lib/canonical-positive-integer.mjs"
+import { isConcreteEnvValue } from "./lib/env-value-policy.mjs"
+import { validateProductionSupabaseConnection } from "./lib/supabase-release-policy.mjs"
+import { isCurrentSentryOrganizationToken } from "./lib/sentry-release-policy.mjs"
 
 const env = {
   ...readEnvFile(".env.local"),
@@ -10,6 +14,7 @@ const env = {
 }
 const lockedVercelProjectId = "prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE"
 const lockedVercelTeamSlug = "rorys-projects-accf0d71"
+const canonicalInboundDomain = "inbound.maintainflow.io"
 
 if (env.VERCEL_PROJECT_ID && env.VERCEL_PROJECT_ID !== lockedVercelProjectId) {
   throw new Error(`VERCEL_PROJECT_ID must be the locked Maintain Flow V2 project ${lockedVercelProjectId}.`)
@@ -40,8 +45,15 @@ const businessEvalsCutoverKeys = [
   "BROWSERBASE_API_KEY",
   "BROWSERBASE_PROJECT_ID",
   "BROWSERBASE_EGRESS_PROXY_SERVER",
-  "BROWSERBASE_EGRESS_PROXY_USERNAME",
-  "BROWSERBASE_EGRESS_PROXY_PASSWORD",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64",
+  "BROWSERBASE_EGRESS_PROXY_AUDIENCE",
+  "BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID",
+  "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT",
+  "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT",
+  "BROWSERBASE_USAGE_WARNING_PERCENT",
+  "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS",
+  "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES",
   "RESEND_API_KEY",
   "RESEND_INBOUND_WEBHOOK_SECRET",
   "EVAL_INBOUND_DOMAIN",
@@ -59,6 +71,7 @@ const requiredKeys = [
   "NEXT_PUBLIC_APP_URL",
   "NEXT_PUBLIC_SITE_URL",
   "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_PROJECT_REF",
   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "DATABASE_URL",
@@ -84,12 +97,17 @@ const requiredKeys = [
   "STRIPE_PRICE_AGENCY_ANNUAL",
   "STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID",
   "STRIPE_CUSTOMER_PORTAL_ENABLED",
+  "NEXT_PUBLIC_SENTRY_DSN",
+  "SENTRY_AUTH_TOKEN",
+  "SENTRY_ORG",
+  "SENTRY_PROJECT",
   "NEXT_PUBLIC_BUSINESS_EVALS_UI",
   "BUSINESS_EVALS_RUNNER_ENABLED",
   "BUSINESS_EVALS_RUNNER_KILL_SWITCH",
   "BUSINESS_EVALS_SCHEDULER_KILL_SWITCH",
   "BUSINESS_EVALS_SCHEDULER_BATCH_SIZE",
   "BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS",
+  "BROWSER_CONTEXT_CLEANUP_BATCH_SIZE",
   "BUSINESS_EVALS_FIXTURES_ENABLED",
   "ALERT_DELIVERY_BATCH_SIZE",
   ...businessEvalsCutoverKeys,
@@ -100,6 +118,7 @@ if (releaseStage === "canary") {
 
 const optionalKeys = [
   "MAINTAINFLOW_MIGRATION_PHASE",
+  "NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE",
   "NEXT_PUBLIC_EMAIL_PASSWORD_AUTH_ENABLED",
   "NEXT_PUBLIC_SUPABASE_AUTH_URL",
   "SUPABASE_AUTH_EMAIL_TEMPLATES_CONFIRMED",
@@ -139,6 +158,7 @@ const optionalKeys = [
   "BUSINESS_EVALS_SCHEDULER_KILL_SWITCH",
   "BUSINESS_EVALS_SCHEDULER_BATCH_SIZE",
   "BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS",
+  "BROWSER_CONTEXT_CLEANUP_BATCH_SIZE",
   "BUSINESS_EVALS_FIXTURES_ENABLED",
   "BUSINESS_EVALS_FIXTURE_FROM_EMAIL",
   "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET",
@@ -148,8 +168,15 @@ const optionalKeys = [
   "BROWSERBASE_API_KEY",
   "BROWSERBASE_PROJECT_ID",
   "BROWSERBASE_EGRESS_PROXY_SERVER",
-  "BROWSERBASE_EGRESS_PROXY_USERNAME",
-  "BROWSERBASE_EGRESS_PROXY_PASSWORD",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID",
+  "BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64",
+  "BROWSERBASE_EGRESS_PROXY_AUDIENCE",
+  "BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID",
+  "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT",
+  "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT",
+  "BROWSERBASE_USAGE_WARNING_PERCENT",
+  "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS",
+  "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES",
   "RESEND_API_KEY",
   "RESEND_INBOUND_WEBHOOK_SECRET",
   "EVAL_INBOUND_DOMAIN",
@@ -166,24 +193,33 @@ const optionalKeys = [
   "STRIPE_CUSTOMER_PORTAL_CONFIGURATION_ID",
   "STRIPE_CUSTOMER_PORTAL_ENABLED",
   "NEXT_PUBLIC_SENTRY_DSN",
+  "SENTRY_AUTH_TOKEN",
+  "SENTRY_ORG",
+  "SENTRY_PROJECT",
   "MAINTAINFLOW_OPS_ROUTE_KEY",
   "OPS_ADMIN_EMAILS",
 ]
 
+const alwaysRetiredKeys = [
+  "BROWSERBASE_EGRESS_PROXY_USERNAME",
+  "BROWSERBASE_EGRESS_PROXY_PASSWORD",
+  "NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE",
+  "SENTRY_URL",
+]
 const keysToRemove = releaseStage === "launch"
-  ? ["BUSINESS_EVALS_WORKSPACE_ALLOWLIST", "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET", "BUSINESS_EVALS_FIXTURE_FROM_EMAIL"]
-  : []
+  ? [...alwaysRetiredKeys, "BUSINESS_EVALS_WORKSPACE_ALLOWLIST", "BUSINESS_EVALS_FIXTURE_SIGNING_SECRET", "BUSINESS_EVALS_FIXTURE_FROM_EMAIL"]
+  : alwaysRetiredKeys
 const keys = [...new Set([...requiredKeys, ...optionalKeys])]
-  .filter((key) => env[key] && !keysToRemove.includes(key))
-const missing = requiredKeys.filter((key) => !env[key])
+  .filter((key) => isConcreteEnvValue(env[key]) && !keysToRemove.includes(key))
+const missing = requiredKeys.filter((key) => !isConcreteEnvValue(env[key]))
 if (missing.length) {
   throw new Error(`Missing required env vars in .env.local: ${missing.join(", ")}`)
 }
 validateProductionReleaseValues(env, releaseStage)
 
 if (dryRun) {
-  const presentOptionalKeys = optionalKeys.filter((key) => env[key])
-  const missingOptionalKeys = optionalKeys.filter((key) => !env[key])
+  const presentOptionalKeys = optionalKeys.filter((key) => isConcreteEnvValue(env[key]))
+  const missingOptionalKeys = optionalKeys.filter((key) => !isConcreteEnvValue(env[key]))
 
   console.log(`Vercel env dry run for environments: ${environments.join(", ")}`)
   console.log(`Release stage: ${releaseStage}`)
@@ -228,7 +264,8 @@ for (const key of keysToRemove) {
 
 for (const key of keys) {
   for (const environment of environments) {
-    const result = runVercel(["env", "add", key, environment, "--force", "--yes", ...projectArgs], `${env[key]}\n`)
+    const sensitivityFlag = isSensitiveEnvKey(key) ? "--sensitive" : "--no-sensitive"
+    const result = runVercel(["env", "add", key, environment, "--force", "--yes", sensitivityFlag, ...projectArgs], `${env[key]}\n`)
 
     if (result.status === 0) {
       console.log(`Upserted ${key} in ${environment}.`)
@@ -262,12 +299,25 @@ function readEnvFile(path) {
         .filter((line) => line && !line.startsWith("#") && line.includes("="))
         .map((line) => {
           const separator = line.indexOf("=")
-          return [line.slice(0, separator), line.slice(separator + 1)]
+          return [line.slice(0, separator), stripQuotes(line.slice(separator + 1))]
         })
     )
   } catch {
     return {}
   }
+}
+
+function stripQuotes(value) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1)
+  }
+
+  return value
+}
+
+function isSensitiveEnvKey(key) {
+  if (key.startsWith("NEXT_PUBLIC_") || key.endsWith("_KEY_ID") || key.endsWith("_MIN_LENGTH")) return false
+  return /(?:KEY|SECRET|PASSWORD|PEPPER|TOKEN|PRIVATE|ENCRYPTION|DATABASE_URL|SERVICE_ROLE)/.test(key)
 }
 
 function redact(value) {
@@ -310,24 +360,40 @@ function validateBrowserbaseEgressProxy(values) {
     || proxyUrl.pathname !== "/"
     || proxyUrl.search
     || proxyUrl.hash
+    || proxyUrl.port
     || !hostname
     || !hostname.includes(".")
     || hostname === "localhost"
     || reservedSuffixes.some((suffix) => hostname.endsWith(suffix))
     || isIP(unbracketedHostname)
   ) {
-    throw new Error("BROWSERBASE_EGRESS_PROXY_SERVER must be a credential-free HTTPS origin on a public DNS hostname.")
+    throw new Error("BROWSERBASE_EGRESS_PROXY_SERVER must be a credential-free HTTPS origin on port 443 with a public DNS hostname.")
   }
-  if (!/^\S{1,256}$/.test((values.BROWSERBASE_EGRESS_PROXY_USERNAME || "").trim())) {
-    throw new Error("BROWSERBASE_EGRESS_PROXY_USERNAME must be present and contain no whitespace.")
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test((values.BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID || "").trim())) {
+    throw new Error("BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID must be one structurally safe key identifier.")
   }
-  const passwordLength = (values.BROWSERBASE_EGRESS_PROXY_PASSWORD || "").trim().length
-  if (passwordLength < 16 || passwordLength > 1_024) {
-    throw new Error("BROWSERBASE_EGRESS_PROXY_PASSWORD must contain between 16 and 1024 characters.")
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test((values.BROWSERBASE_EGRESS_PROXY_AUDIENCE || "").trim())) {
+    throw new Error("BROWSERBASE_EGRESS_PROXY_AUDIENCE must be one structurally safe audience.")
+  }
+  try {
+    const encoded = (values.BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64 || "").trim()
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error("invalid base64")
+    const signingKey = createPrivateKey({ key: Buffer.from(encoded, "base64"), format: "der", type: "pkcs8" })
+    if (signingKey.asymmetricKeyType !== "ed25519") throw new Error("not Ed25519")
+  } catch {
+    throw new Error("Browserbase egress proxy signing key must be a base64 PKCS#8 Ed25519 private key.")
+  }
+  const caCertificateId = (values.BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID || "").trim()
+  if (caCertificateId.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(caCertificateId)) {
+    throw new Error("BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID must be one structurally safe Browserbase certificate ID.")
   }
 }
 
 function validateProductionReleaseValues(values, stage) {
+  if ((values.NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE || "").trim()) {
+    throw new Error("NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE is local-development-only and must be absent from a production release.")
+  }
+  validateProductionSupabaseConnection(values)
   const authBlockers = evaluateSupabaseAuthReadiness(values, { releaseStage: stage }).filter((result) => result.level === "BLOCK")
   if (authBlockers.length) throw new Error(`Supabase Auth is not production ready: ${authBlockers.map((result) => result.message).join("; ")}`)
   for (const key of ["SUPABASE_PRODUCTION_PLAN_CONFIRMED", "VERCEL_COMMERCIAL_PLAN_CONFIRMED", "BROWSERBASE_CUSTOM_PROXY_PLAN_CONFIRMED"]) {
@@ -343,14 +409,21 @@ function validateProductionReleaseValues(values, stage) {
   if (stage === "canary" && values.BUSINESS_EVALS_FIXTURES_ENABLED !== "true") throw new Error("BUSINESS_EVALS_FIXTURES_ENABLED must be true for the bounded canary.")
   if (stage === "launch" && values.BUSINESS_EVALS_FIXTURES_ENABLED !== "false") throw new Error("BUSINESS_EVALS_FIXTURES_ENABLED must remain false at launch.")
   if (values.STRIPE_CUSTOMER_PORTAL_ENABLED !== "true") throw new Error("STRIPE_CUSTOMER_PORTAL_ENABLED must be true after the verified portal configuration is connected.")
+  if (!isCanonicalSentryDsn(values.NEXT_PUBLIC_SENTRY_DSN)) throw new Error("NEXT_PUBLIC_SENTRY_DSN must be a public-key-only Sentry ingest DSN.")
+  if (!isCurrentSentryOrganizationToken(values.SENTRY_AUTH_TOKEN)) throw new Error("SENTRY_AUTH_TOKEN must have current organization-token structure.")
+  for (const key of ["SENTRY_ORG", "SENTRY_PROJECT"]) {
+    if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test((values[key] || "").trim())) throw new Error(`${key} must be a safe Sentry slug.`)
+  }
 
   const schedulerBatch = Number(values.BUSINESS_EVALS_SCHEDULER_BATCH_SIZE)
   const schedulerLease = Number(values.BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS)
   const alertBatch = Number(values.ALERT_DELIVERY_BATCH_SIZE)
+  const contextCleanupBatch = Number(values.BROWSER_CONTEXT_CLEANUP_BATCH_SIZE)
   if ((values.CRON_SECRET || "").trim().length < 32) throw new Error("CRON_SECRET must contain at least 32 characters.")
   if (!Number.isInteger(schedulerBatch) || schedulerBatch < 1 || schedulerBatch > 25) throw new Error("BUSINESS_EVALS_SCHEDULER_BATCH_SIZE must be between 1 and 25.")
   if (!Number.isInteger(schedulerLease) || schedulerLease < 120 || schedulerLease > 900) throw new Error("BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS must be between 120 and 900.")
   if (!Number.isInteger(alertBatch) || alertBatch < 1 || alertBatch > 100) throw new Error("ALERT_DELIVERY_BATCH_SIZE must be between 1 and 100.")
+  if (!Number.isInteger(contextCleanupBatch) || contextCleanupBatch < 1 || contextCleanupBatch > 4) throw new Error("BROWSER_CONTEXT_CLEANUP_BATCH_SIZE must be between 1 and 4.")
 
   for (const key of ["RESEND_INBOUND_WEBHOOK_SECRET", "EVAL_EMAIL_ROUTING_SECRET", "REPORT_SHARE_TOKEN_PEPPER", "RUN_LOG_KEY_PEPPER", "ALERT_ENDPOINT_ENCRYPTION_KEY"]) {
     if ((values[key] || "").trim().length < 32) throw new Error(`${key} must contain at least 32 characters.`)
@@ -367,9 +440,49 @@ function validateProductionReleaseValues(values, stage) {
   } catch {
     throw new Error("EVAL_CLEANUP_SIGNING_PRIVATE_KEY_BASE64 must be a base64 PKCS#8 Ed25519 private key.")
   }
-  if (!isPublicHostname(values.EVAL_INBOUND_DOMAIN)) throw new Error("EVAL_INBOUND_DOMAIN must be a public DNS hostname.")
+  if (normalizeHostname(values.EVAL_INBOUND_DOMAIN) !== canonicalInboundDomain) {
+    throw new Error(`EVAL_INBOUND_DOMAIN must be exactly ${canonicalInboundDomain}.`)
+  }
+  if (values.EVAL_SYNTHETIC_EMAIL_DOMAIN) {
+    const syntheticDomain = normalizeHostname(values.EVAL_SYNTHETIC_EMAIL_DOMAIN)
+    if (syntheticDomain !== "example.invalid" && syntheticDomain !== canonicalInboundDomain) {
+      throw new Error(`EVAL_SYNTHETIC_EMAIL_DOMAIN must be example.invalid or ${canonicalInboundDomain}.`)
+    }
+  }
   if (!/^[^\s@]+@maintainflow\.io$/i.test((values.MAINTAINFLOW_ALERT_FROM_EMAIL || "").trim())) {
     throw new Error("MAINTAINFLOW_ALERT_FROM_EMAIL must use the verified @maintainflow.io sender.")
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test((values.BROWSERBASE_PROJECT_ID || "").trim())) {
+    throw new Error("BROWSERBASE_PROJECT_ID must identify one structurally safe Browserbase project.")
+  }
+  parseCanonicalPositiveSafeInteger(
+    values.BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT,
+    "BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT"
+  )
+  parseCanonicalPositiveSafeInteger(
+    values.BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT,
+    "BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT"
+  )
+  const usageWarningPercent = parseCanonicalPositiveSafeInteger(
+    values.BROWSERBASE_USAGE_WARNING_PERCENT,
+    "BROWSERBASE_USAGE_WARNING_PERCENT"
+  )
+  const meteringMaxAttempts = parseCanonicalPositiveSafeInteger(
+    values.BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS,
+    "BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS"
+  )
+  const meteringMaxAgeMinutes = parseCanonicalPositiveSafeInteger(
+    values.BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES,
+    "BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES"
+  )
+  if (usageWarningPercent < 50 || usageWarningPercent > 95) {
+    throw new Error("BROWSERBASE_USAGE_WARNING_PERCENT must be between 50 and 95.")
+  }
+  if (meteringMaxAttempts < 3 || meteringMaxAttempts > 100) {
+    throw new Error("BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS must be between 3 and 100.")
+  }
+  if (meteringMaxAgeMinutes < 15 || meteringMaxAgeMinutes > 1440) {
+    throw new Error("BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES must be between 15 and 1440.")
   }
   if (stage === "canary") {
     if ((values.BUSINESS_EVALS_FIXTURE_SIGNING_SECRET || "").trim().length < 32) {
@@ -424,12 +537,21 @@ function isExactBase64Key(value, expectedBytes) {
     && decoded.toString("base64").replace(/=+$/, "") === normalized.replace(/=+$/, "")
 }
 
-function isPublicHostname(value) {
-  const hostname = String(value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "")
-  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(hostname)
-    && !hostname.endsWith(".localhost")
-    && !hostname.endsWith(".local")
-    && !hostname.endsWith(".internal")
-    && !hostname.endsWith(".test")
-    && !hostname.endsWith(".invalid")
+function normalizeHostname(value) {
+  return String(value || "").trim().toLowerCase().replace(/^\.+|\.+$/g, "")
+}
+
+function isCanonicalSentryDsn(value) {
+  try {
+    const url = new URL(String(value || "").trim())
+    return url.protocol === "https:"
+      && Boolean(url.username)
+      && !url.password
+      && (url.hostname === "sentry.io" || url.hostname.endsWith(".sentry.io"))
+      && /^\/\d+\/?$/.test(url.pathname)
+      && !url.search
+      && !url.hash
+  } catch {
+    return false
+  }
 }

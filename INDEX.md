@@ -21,8 +21,11 @@ This index covers the canonical public V2 repository only. Start here:
 - `SECURITY.md` — authorization, SSRF, evidence, email, webhook, and operational controls.
 - `DEPLOYMENT_RUNBOOK.md` — V2 release sequence and exact-commit verification boundary.
 - `PRODUCTION_PROVIDER_CHECKLIST.md` — provider configuration and launch evidence checklist.
+- `docs/business-evals/LEGAL_RELEASE_INPUTS.md` — blocking operator facts, contract decisions, privacy mapping, and professional-review gate.
 - `docs/business-evals/ACCEPTANCE_RUNBOOK.md` — product, migration, browser, and release acceptance procedure.
 - `docs/business-evals/BROWSERBASE_EGRESS_SECURITY_SPEC.md` — runner egress requirements and acceptance evidence.
+- `docs/business-evals/BROWSER_EGRESS_CONTAINER_VULNERABILITY_POLICY.md` — complete image reports, SBOMs, and the fixable high/critical release gate.
+- `docs/business-evals/BROWSER_EGRESS_CONTAINER_RESIDUAL_RISK.md` — dated residual reachability review that must be revalidated against exact-release artifacts.
 - `STRIPE_BILLING.md` — billing plans, trials, grandfathering, checkout, webhooks, and portal behavior.
 - `VERCEL_DASHBOARD_ENV.md` — Vercel project and environment-variable contract.
 - `ENV_EXAMPLE.md` — environment-variable names and safe placeholder values.

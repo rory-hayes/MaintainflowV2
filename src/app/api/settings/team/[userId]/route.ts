@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 
 import { assertUuid, businessEvalsErrorResponse, requireBusinessEvalsAuth } from "@/lib/api/business-evals-auth.server"
+import { parseRequestJson } from "@/lib/api/business-evals-contracts"
 import { removeWorkspaceTeamMember, updateWorkspaceTeamMember } from "@/lib/api/workspace-settings.server"
 
 export const runtime = "nodejs"
@@ -14,7 +15,7 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   try {
     const auth = await requireBusinessEvalsAuth(request, { roles: ["owner"] })
     const { userId } = await params
-    const input = roleSchema.parse(await request.json().catch(() => null))
+    const input = await parseRequestJson(request, roleSchema)
     return NextResponse.json({
       ok: true,
       data: await updateWorkspaceTeamMember({

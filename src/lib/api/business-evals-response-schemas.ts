@@ -753,6 +753,15 @@ export const billingSettingsResponseSchema = z.object({
     runs: usageLimitResponseSchema,
     seats: usageLimitResponseSchema,
     evidenceRetentionDays: z.number().int().nonnegative(),
+    browser: z.object({
+      sessionActiveMinutes: z.number().nonnegative(),
+      proxyBytes: z.number().int().nonnegative(),
+      proxyMegabytes: z.number().nonnegative(),
+      sessions: z.number().int().nonnegative(),
+      measuredThrough: nullableTextSchema,
+      status: z.enum(["pending", "healthy", "warning", "paused"]),
+      warning: z.string(),
+    }).strict(),
   }).strict(),
   features: z.record(z.string(), z.boolean()),
   trial: z.object({

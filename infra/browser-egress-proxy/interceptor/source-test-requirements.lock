@@ -1,0 +1,7 @@
+# Exact additional dependencies used by the pinned mitmproxy focused suites.
+# attrs and sortedcontainers are already hash-locked runtime dependencies;
+# pytest is already locked in uv.lock.
+hypothesis==6.130.6 \
+    --hash=sha256:fe457a716797dbcc9c3dd77fe4164d65f77296010ce5b931910276242a90ed0e
+pytest-asyncio==1.2.0 \
+    --hash=sha256:8e17ae5e46d8e7efe51ab6494dd2010f4ca8dae51652aa3c8d55acf50bfb2e99

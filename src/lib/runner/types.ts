@@ -16,9 +16,14 @@ export type RunnerAssertionResult = {
 
 export type BrowserSessionHandle = {
   provider: RunnerProviderName
-  sessionId: string
-  allowedHosts: string[]
-  expiresAt: string
+  /** Opaque provider Context ID. Never a connection URL or browser credential. */
+  contextId: string
+  /** Opaque ID of the most recently ended short-lived provider session. */
+  lastSessionId: string | null
+  /** Sanitized origin + path only. Query strings and fragments are never durable. */
+  resumeUrl: string | null
+  /** Earliest safe time to open the next sequential session on this Context. */
+  readyAt: string
 }
 
 export type BrowserEvalStage = {
@@ -70,6 +75,7 @@ export type BrowserPhaseResult = {
 
 export type ExecuteBrowserPhaseInput = {
   session?: BrowserSessionHandle
+  contextMode: "create" | "restore"
   runId: string
   traceMode: RunnerTraceMode
   startUrl: string
@@ -85,5 +91,6 @@ export type ExecuteBrowserPhaseInput = {
 export interface BrowserEvalProvider {
   readonly name: RunnerProviderName
   executePhase(input: ExecuteBrowserPhaseInput): Promise<BrowserPhaseResult>
-  releaseSession(session: BrowserSessionHandle): Promise<void>
+  loadRunContext(runId: string): Promise<BrowserSessionHandle | null>
+  releaseRunContext(runId: string, session?: BrowserSessionHandle): Promise<void>
 }

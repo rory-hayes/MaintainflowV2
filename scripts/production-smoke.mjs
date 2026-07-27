@@ -76,6 +76,16 @@ await checkJson("/api/cron/run-checks", {
     }
   },
 })
+await checkJson("/api/cron/cleanup-browser-contexts", {
+  method: "POST",
+  body: { batchSize: 4 },
+  status: 401,
+  assert: (body) => {
+    if (!String(body?.error || "").includes("Unauthorized")) {
+      throw new Error("Browser Context cleanup cron route did not reject an unauthenticated request")
+    }
+  },
+})
 await checkJson("/api/checks/test", {
   method: "POST",
   body: {},

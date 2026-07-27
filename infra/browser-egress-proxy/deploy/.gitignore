@@ -1,0 +1,13 @@
+# Operator-generated certificates, keys, rendered configs, and secret exports.
+pki-output/
+secrets/
+rendered/
+*.key
+*.pem
+*.p12
+*.csr
+*.secret
+*.env.local
+__pycache__/
+**/__pycache__/
+*.pyc

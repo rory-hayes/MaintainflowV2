@@ -12,3 +12,14 @@ export function safeAuthNextPath(value: string | null | undefined, fallback: str
     return fallback
   }
 }
+
+export function safeSignInHrefForRoute(
+  pathname: string | null | undefined,
+  search: string | null | undefined,
+  fallback = "/projects"
+) {
+  const normalizedSearch = search?.trim().replace(/^\?/, "") ?? ""
+  const candidate = `${pathname ?? ""}${normalizedSearch ? `?${normalizedSearch}` : ""}`
+  const nextPath = safeAuthNextPath(candidate, fallback)
+  return `/sign-in?next=${encodeURIComponent(nextPath)}`
+}

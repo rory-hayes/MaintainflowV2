@@ -43,10 +43,9 @@ const primaryNav = [
 export function EvalsAppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
-  const { projects, activeProjectId, setActiveProjectId, pagination, previewMode } = useEvals()
+  const { projects, pagination, previewMode } = useEvals()
   const { user, signOut } = useAuth()
   const preview = previewMode
-  const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0]
 
   if (pathname.startsWith("/share/reports/")) {
     return <div className="min-h-dvh bg-[#fbfaf7] text-slate-950">{children}</div>
@@ -85,8 +84,6 @@ export function EvalsAppShell({ children }: { children: ReactNode }) {
           <div className="hidden items-center gap-3 lg:flex">
             <ProjectSwitcher
               projects={projects}
-              activeProjectId={activeProject?.id ?? ""}
-              onSelect={setActiveProjectId}
               pagination={pagination.projects}
             />
             <AccountMenu name={preview ? "Lena Moore" : user?.name || user?.email || "Workspace member"} role={preview ? "Owner" : user?.role || "Member"} onSignOut={signOut} />
@@ -108,7 +105,7 @@ export function EvalsAppShell({ children }: { children: ReactNode }) {
                 <SheetDescription>Business evals for critical customer journeys.</SheetDescription>
               </SheetHeader>
               <div className="flex flex-col gap-5 p-4">
-                <ProjectSwitcher projects={projects} activeProjectId={activeProject?.id ?? ""} onSelect={setActiveProjectId} pagination={pagination.projects} mobile />
+                <ProjectSwitcher projects={projects} pagination={pagination.projects} mobile onNavigate={() => setMobileOpen(false)} />
                 <nav aria-label="Mobile product navigation" className="flex flex-col gap-1">
                   {primaryNav.map((item) => {
                     const active = pathname.startsWith(item.prefix) || (pathname === "/evals-preview" && item.prefix === "/journeys")
@@ -147,18 +144,15 @@ export function EvalsAppShell({ children }: { children: ReactNode }) {
 
 function ProjectSwitcher({
   projects,
-  activeProjectId,
-  onSelect,
   pagination,
   mobile = false,
+  onNavigate,
 }: {
   projects: ReturnType<typeof useEvals>["projects"]
-  activeProjectId: string
-  onSelect: (id: string) => void
   pagination: ReturnType<typeof useEvals>["pagination"]["projects"]
   mobile?: boolean
+  onNavigate?: () => void
 }) {
-  const active = projects.find((project) => project.id === activeProjectId) ?? projects[0]
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -167,15 +161,15 @@ function ProjectSwitcher({
       >
         <span className="flex min-w-0 items-center gap-2">
           <IconBuilding aria-hidden className="size-4 shrink-0 text-slate-500" />
-          <span className="truncate">{active?.name ?? "Choose project"}</span>
+          <span className="truncate">Open project</span>
         </span>
         <IconChevronDown aria-hidden className="size-4 text-slate-500" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[240px]">
         <DropdownMenuGroup>
-          <DropdownMenuLabel>Active project</DropdownMenuLabel>
+          <DropdownMenuLabel>Projects</DropdownMenuLabel>
           {projects.map((project) => (
-            <DropdownMenuItem key={project.id} onClick={() => onSelect(project.id)} className={cn(project.id === activeProjectId && "bg-blue-50 text-blue-700")}>
+            <DropdownMenuItem key={project.id} render={<Link href={`/projects/${project.id}`} onClick={onNavigate} />}>
               <IconBuilding />
               <span className="min-w-0">
                 <span className="block truncate">{project.name}</span>

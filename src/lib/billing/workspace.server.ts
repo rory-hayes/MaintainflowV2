@@ -2,7 +2,8 @@ import "server-only"
 
 import { businessEvalsBillingContractVersion, cardFreeWorkspaceTrialDays, type BillingPlanId, type BillingContractVersion } from "@/lib/billing/plans"
 import type { StripeSubscriptionStatus } from "@/lib/core/types"
-import { getSupabaseServerConfig, supabaseServiceJson } from "@/lib/supabase/server"
+import { supabaseServiceJson } from "@/lib/supabase/server"
+import { getSupabaseUserAuthConfig, verifySupabaseAccessToken } from "@/lib/supabase/user-auth"
 
 type SupabaseUser = {
   id: string
@@ -231,25 +232,18 @@ export async function startCardFreeTeamTrial(agencyId: string) {
 }
 
 async function verifySupabaseUser(token: string): Promise<SupabaseUser> {
-  const config = getSupabaseServerConfig()
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ""
-  if (!anonKey) {
+  const config = getSupabaseUserAuthConfig()
+  if (!config.enabled) {
     throw new BillingAuthenticationError("Billing authentication is not configured.")
   }
 
-  const response = await fetch(`${config.authUrl}/auth/v1/user`, {
-    headers: {
-      apikey: anonKey,
-      Authorization: `Bearer ${token}`,
-    },
-  })
-  const user = (await response.json().catch(() => ({}))) as SupabaseUser & { msg?: string; error?: string }
-
-  if (!response.ok || !user.id) {
-    throw new BillingAuthenticationError(user.msg || user.error || "Sign in again before opening billing.")
+  try {
+    return await verifySupabaseAccessToken(token, config)
+  } catch (error) {
+    throw new BillingAuthenticationError(
+      error instanceof Error ? error.message : "Sign in again before opening billing."
+    )
   }
-
-  return user
 }
 
 function query(params: Record<string, string>) {

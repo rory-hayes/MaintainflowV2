@@ -10,17 +10,29 @@ VERCEL_PROJECT_ID=prj_zbbXA1ZH26G9YAL8sNtEkxHy1AwE
 # For the selected-workspace canary only, use https://maintainflow-v2.vercel.app
 # for both public URL values. Restore the canonical www origin before launch.
 
-# Local QA
-# Set to local when you need browser-only auth/data while real Supabase keys remain in .env.local.
+# Local release evidence only; do not push these values to Vercel. Copy the
+# reviewed example to the ignored path only after professional review, bind it
+# to the exact release commit, and record the successful GitHub Actions run.
+MAINTAINFLOW_LEGAL_RELEASE_MANIFEST_PATH=.legal-release.json
+RELEASE_CI_RUN_URL=
+
+# Local QA only. Production readiness and environment-push scripts reject and
+# remove this key so a missing hosted Auth configuration can never open demo mode.
+# Set to local only when you need browser-only local auth/data.
 NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE=
 
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL=
+# Exact project reference from the URL above. Production auth remains disabled
+# unless these values match, so credentials cannot be sent to another tenant.
+NEXT_PUBLIC_SUPABASE_PROJECT_REF=
 # Optional branded Supabase Auth base URL, for example https://auth.maintainflow.io.
 # Keep NEXT_PUBLIC_SUPABASE_URL on the Supabase project URL for REST and Storage.
 NEXT_PUBLIC_SUPABASE_AUTH_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+# Use Supabase's current key format. The publishable key is browser-safe; the
+# secret key is server-only, bypasses RLS, and must never be exposed or logged.
+NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_...
+SUPABASE_SERVICE_ROLE_KEY=sb_secret_...
 SUPABASE_JWT_SECRET=
 DATABASE_URL=
 # First compatible deployment: expand. Change Production to contract only after
@@ -75,6 +87,8 @@ STRIPE_CUSTOMER_PORTAL_ENABLED=false
 
 # Sentry
 NEXT_PUBLIC_SENTRY_DSN=
+# Server and build-time source-map configuration. The auth token is secret;
+# the organisation and project values are non-secret slugs.
 SENTRY_AUTH_TOKEN=
 SENTRY_ORG=
 SENTRY_PROJECT=
@@ -102,6 +116,9 @@ CHECK_RUNNER_BATCH_SIZE=5
 CHECK_RUNNER_LEASE_SECONDS=180
 BUSINESS_EVALS_SCHEDULER_BATCH_SIZE=5
 BUSINESS_EVALS_SCHEDULER_LEASE_SECONDS=300
+# Defaults to 4 and is clamped to 1-4 contexts per cron pass so one provider
+# wave remains inside the dedicated route's 60-second execution budget.
+BROWSER_CONTEXT_CLEANUP_BATCH_SIZE=4
 ALERT_DELIVERY_BATCH_SIZE=10
 
 # Business Evals production providers
@@ -110,19 +127,38 @@ OPENAI_API_KEY=
 BUSINESS_EVALS_AI_MODEL=gpt-5.6-sol
 BROWSERBASE_API_KEY=
 BROWSERBASE_PROJECT_ID=
+# Required internal commercial ceilings for the single reviewed production
+# Browserbase project. Set them below the payable maximum with enough headroom
+# for bounded sessions already in flight. They do not change customer quotas.
+BROWSERBASE_MONTHLY_BROWSER_MINUTES_LIMIT=
+BROWSERBASE_MONTHLY_PROXY_BYTES_LIMIT=
+BROWSERBASE_USAGE_WARNING_PERCENT=80
+BROWSERBASE_SESSION_METERING_MAX_ATTEMPTS=12
+BROWSERBASE_SESSION_METERING_MAX_AGE_MINUTES=60
 # Required for every Browserbase-backed eval and page scan. This must be the
-# dedicated policy-enforcing HTTPS egress proxy origin, with credentials kept in
-# separate variables. Browserbase managed proxies and direct fallback are forbidden.
+# dedicated policy-enforcing HTTPS egress proxy origin on port 443. Maintain Flow
+# mints a new Ed25519-signed Basic credential for every Browserbase session; the
+# signing key remains server-only and each credential expires within 15 minutes.
+# Browserbase managed proxies, static shared passwords and direct fallback are forbidden.
 BROWSERBASE_EGRESS_PROXY_SERVER=https://egress-proxy.example.com:443
-BROWSERBASE_EGRESS_PROXY_USERNAME=
-BROWSERBASE_EGRESS_PROXY_PASSWORD=
+BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID=primary_2026
+# Base64-encoded PKCS#8 Ed25519 private key paired with the gateway's trusted
+# public verification key. Generate and store this as a production secret.
+BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64=
+BROWSERBASE_EGRESS_PROXY_AUDIENCE=maintainflow-browser-egress
+# Browserbase ID for the reviewed public CA certificate uploaded to this same
+# Browserbase project. This is an opaque public record ID, never PEM content or
+# the CA private key. Every production session installs it through
+# proxySettings.caCertificates while certificate verification remains enabled.
+BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID=
 RESEND_API_KEY=
 RESEND_INBOUND_WEBHOOK_SECRET=
 EVAL_INBOUND_DOMAIN=inbound.maintainflow.io
 # The same domain receives opaque per-run autoresponses and HMAC-authenticated
 # stable journey aliases used by customer-owned destination forwarding rules.
-# Optional address domain for browser-only lead evals. Defaults to example.invalid.
-EVAL_SYNTHETIC_EMAIL_DOMAIN=
+# Optional address domain for browser-only lead evals. Production accepts only
+# example.invalid (the default reserved sink) or the owned inbound subdomain.
+EVAL_SYNTHETIC_EMAIL_DOMAIN=example.invalid
 MAINTAINFLOW_ALERT_FROM_EMAIL=
 BUSINESS_EVALS_DOMAIN_DENYLIST=
 # Controlled runner canaries. Production fixture routes remain 404 until this

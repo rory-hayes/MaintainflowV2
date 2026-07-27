@@ -25,7 +25,7 @@ const controls = [
   {
     title: "Isolated browser and endpoint runners",
     detail:
-      "Browser attempts use clean isolated contexts, bounded egress, time, steps, redirects, storage, and per-workspace/domain concurrency. Legacy endpoint journeys retain public-HTTPS GET, DNS, redirect, response-size, and SSRF controls.",
+      "Each browser run receives one isolated context and separate short-lived sessions for submission, verification, and cleanup, so no customer page remains live while email is pending. Context deletion is tracked and retried. Egress, time, steps, redirects, storage, and concurrency remain bounded. Legacy endpoint journeys retain public-HTTPS GET, DNS, redirect, response-size, and SSRF controls.",
   },
   {
     title: "Human and destructive gates",
@@ -56,6 +56,11 @@ const controls = [
     title: "Release verification",
     detail:
       "Every production release is gated on isolation, authorization, SSRF, CAPTCHA, email-correlation, verdict, evidence, retention, billing, rollback, provider-smoke, and exact-deployment checks. A local build alone is not treated as live proof.",
+  },
+  {
+    title: "Browser and error-monitoring protections",
+    detail:
+      "Production responses enforce Content Security Policy, anti-framing, transport, referrer, permissions, and content-type protections. Client, server, and edge errors are release-mapped after a fail-closed scrubber removes identities, request payloads and URLs, extra data, email addresses, common credentials, and query strings; Session Replay and default PII are disabled.",
   },
 ]
 

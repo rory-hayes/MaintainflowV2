@@ -20,6 +20,7 @@ import {
 } from "@/lib/runner/assertion-results"
 import { getBrowserEvalProvider } from "@/lib/runner/provider.server"
 import { assertPublicBrowserTarget } from "@/lib/runner/browser-safety.server"
+import { isBrowserContextRestoreError } from "@/lib/runner/browser-context-policy"
 import { classifyEmailTiming, type EmailTimingResult } from "@/lib/runner/email-timing"
 import { createSyntheticRunValues } from "@/lib/runner/synthetic-values"
 import {
@@ -129,7 +130,7 @@ export async function runBusinessEvalWorkflow(input: EvalWorkflowInput) {
       if (context.cancelRequested) {
         results.push(...businessStages.map((stage) => cancelledStage(stage, "The run was cancelled before browser execution.")))
       } else if (beforeEmail.length) {
-        const phase = await executeBrowserPhaseStep(context, beforeEmail, undefined, workerId)
+        const phase = await executeBrowserPhaseStep(context, beforeEmail, undefined, workerId, false, "create")
         session = phase.session
         submissionCompletedAt = phase.submissionCompletedAt
         results.push(...phase.stages)
@@ -236,7 +237,7 @@ export async function runBusinessEvalWorkflow(input: EvalWorkflowInput) {
                 results.push(...afterEmail.map((stage) => inconclusiveStage(stage, "VERIFICATION_LINK_MISSING", "The verified email did not contain an allowlisted verification link.")))
               } else {
                 const postEmailStages = afterEmail.map((stage) => withVerificationLink(stage, emailOutcome.verificationLink))
-                const phase = await executeBrowserPhaseStep(context, postEmailStages, session, workerId, true)
+                const phase = await executeBrowserPhaseStep(context, postEmailStages, session, workerId, true, "restore")
                 session = phase.session
                 results.push(...phase.stages)
               }
@@ -251,7 +252,7 @@ export async function runBusinessEvalWorkflow(input: EvalWorkflowInput) {
       if (firstUnreached) {
         results.push(inconclusiveStage(
           firstUnreached,
-          "WORKFLOW_STEP_FAILED",
+          isBrowserContextRestoreError(error) ? "BROWSER_CONTEXT_RESTORE_FAILED" : "WORKFLOW_STEP_FAILED",
           `The durable runner could not produce trustworthy evidence: ${safeError(error)}`
         ))
       }
@@ -275,6 +276,9 @@ export async function runBusinessEvalWorkflow(input: EvalWorkflowInput) {
           })
     }
 
+    if (cleanupStages.some(hasInProductCleanupAction)) {
+      session = await loadBrowserContextForCleanupStep(context.runId) ?? session
+    }
     const cleanup = await executeCleanupStep(context, cleanupStages, session, workerId)
     session = cleanup.session ?? session
     results.push(...cleanup.results)
@@ -290,7 +294,7 @@ export async function runBusinessEvalWorkflow(input: EvalWorkflowInput) {
     })
     return { evalRunId: context.runId, ...final }
   } finally {
-    if (session) await releaseBrowserSessionStep(session)
+    await releaseBrowserContextStep(context.runId, session)
   }
 }
 
@@ -497,7 +501,8 @@ async function executeBrowserPhaseStep(
   stages: WorkflowStage[],
   session: BrowserSessionHandle | undefined,
   workerId: string,
-  forceUnsafeSideEffect = false
+  forceUnsafeSideEffect = false,
+  contextMode: "create" | "restore" = session ? "restore" : "create"
 ): Promise<ExecutedPhase> {
   "use step"
 
@@ -523,6 +528,7 @@ async function executeBrowserPhaseStep(
     const provider = getBrowserEvalProvider()
     const phase = await provider.executePhase({
       session,
+      contextMode,
       runId: context.runId,
       traceMode: "diagnostic",
       startUrl: context.startUrl,
@@ -641,6 +647,7 @@ async function executeCleanupStep(
       const provider = getBrowserEvalProvider()
       const phase = await provider.executePhase({
         session: activeSession,
+        contextMode: "restore",
         runId: context.runId,
         traceMode: "diagnostic",
         startUrl: context.startUrl,
@@ -801,9 +808,14 @@ async function finalizeEvalRunStep(
   }
 }
 
-async function releaseBrowserSessionStep(session: BrowserSessionHandle) {
+async function releaseBrowserContextStep(runId: string, session?: BrowserSessionHandle) {
   "use step"
-  await getBrowserEvalProvider().releaseSession(session)
+  await getBrowserEvalProvider().releaseRunContext(runId, session)
+}
+
+async function loadBrowserContextForCleanupStep(runId: string) {
+  "use step"
+  return getBrowserEvalProvider().loadRunContext(runId)
 }
 
 async function persistPhaseArtifacts(context: EvalWorkflowContext, phase: BrowserPhaseResult) {
@@ -945,6 +957,10 @@ function hasEmailLinkAction(stage: WorkflowStage) {
   return stage.actions.some((action) => action.type === "open_email_link")
 }
 
+function hasInProductCleanupAction(stage: WorkflowStage) {
+  return stage.actions.some((action) => action.type === "cleanup" && action.mode === "in_product")
+}
+
 function normalizeStageResults(stages: WorkflowStage[], results: FinalStageResult[]) {
   return stages
     .sort((left, right) => left.position - right.position)
@@ -1065,8 +1081,7 @@ function baseResult(
 function safeSessionSummary(session: BrowserSessionHandle, currentUrl: string) {
   return {
     provider: session.provider,
-    sessionId: session.sessionId,
-    expiresAt: session.expiresAt,
+    contextReadyAt: session.readyAt,
     currentHost: safeHost(currentUrl),
   }
 }

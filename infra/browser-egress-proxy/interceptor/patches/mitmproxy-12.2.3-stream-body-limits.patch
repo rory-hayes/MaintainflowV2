@@ -1,0 +1,463 @@
+diff --git a/mitmproxy/proxy/layers/http/__init__.py b/mitmproxy/proxy/layers/http/__init__.py
+index d9b91f2..d3fd17b 100644
+--- a/mitmproxy/proxy/layers/http/__init__.py
++++ b/mitmproxy/proxy/layers/http/__init__.py
+@@ -67,6 +67,14 @@ from mitmproxy.utils import human
+ from mitmproxy.websocket import WebSocketData
+ 
+ 
++# Maintain Flow's production profile deliberately uses separate directional
++# ceilings. These constants are also startup sentinels: the interceptor refuses
++# to run if it imports an upstream wheel without this exact patch.
++MAINTAINFLOW_STREAM_LIMITS_PATCHED = True
++MAINTAINFLOW_MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
++MAINTAINFLOW_MAX_RESPONSE_BODY_BYTES = 20 * 1024 * 1024
++
++
+ class HTTPMode(enum.Enum):
+     regular = 1
+     transparent = 2
+@@ -174,6 +182,10 @@ class HttpStream(layer.Layer):
+         super().__init__(context)
+         self.request_body_buf = ReceiveBuffer()
+         self.response_body_buf = ReceiveBuffer()
++        self.request_body_received_bytes = 0
++        self.request_body_forwarded_bytes = 0
++        self.response_body_received_bytes = 0
++        self.response_body_forwarded_bytes = 0
+         self.client_state = self.state_uninitialized
+         self.server_state = self.state_uninitialized
+         self.stream_id = stream_id
+@@ -314,16 +326,9 @@ class HttpStream(layer.Layer):
+         self, event: RequestData | RequestEndOfMessage
+     ) -> layer.CommandGenerator[None]:
+         if isinstance(event, RequestData):
+-            if callable(self.flow.request.stream):
+-                chunks = self.flow.request.stream(event.data)
+-                if isinstance(chunks, bytes):
+-                    chunks = [chunks]
+-            else:
+-                chunks = [event.data]
+-            for chunk in chunks:
+-                if self.context.options.store_streamed_bodies:
+-                    self.request_body_buf += chunk
+-                yield SendHttp(RequestData(self.stream_id, chunk), self.context.server)
++            if (yield from self.check_actual_body_size(True, False, len(event.data))):
++                return
++            yield from self.forward_streamed_request_data(event.data)
+         elif isinstance(event, RequestTrailers):
+             # we don't do anything further here, we wait for RequestEndOfMessage first to trigger the request hook.
+             self.flow.request.trailers = event.trailers
+@@ -335,6 +340,8 @@ class HttpStream(layer.Layer):
+                 elif isinstance(chunks, bytes):
+                     chunks = [chunks]
+                 for chunk in chunks:
++                    if (yield from self.check_actual_body_size(True, True, len(chunk))):
++                        return
+                     if self.context.options.store_streamed_bodies:
+                         self.request_body_buf += chunk
+                     yield SendHttp(
+@@ -359,11 +366,30 @@ class HttpStream(layer.Layer):
+             if self.server_state == self.state_done:
+                 yield from self.flow_done()
+ 
++    def forward_streamed_request_data(
++        self, data: bytes
++    ) -> layer.CommandGenerator[None]:
++        """Forward one already-counted request chunk and bound transformed output."""
++        if callable(self.flow.request.stream):
++            chunks = self.flow.request.stream(data)
++            if isinstance(chunks, bytes):
++                chunks = [chunks]
++        else:
++            chunks = [data]
++        for chunk in chunks:
++            if (yield from self.check_actual_body_size(True, True, len(chunk))):
++                return
++            if self.context.options.store_streamed_bodies:
++                self.request_body_buf += chunk
++            yield SendHttp(RequestData(self.stream_id, chunk), self.context.server)
++
+     @expect(RequestData, RequestTrailers, RequestEndOfMessage)
+     def state_consume_request_body(
+         self, event: events.Event
+     ) -> layer.CommandGenerator[None]:
+         if isinstance(event, RequestData):
++            if (yield from self.check_actual_body_size(True, False, len(event.data))):
++                return
+             self.request_body_buf += event.data
+             yield from self.check_body_size(True)
+         elif isinstance(event, RequestTrailers):
+@@ -391,6 +417,10 @@ class HttpStream(layer.Layer):
+                     return
+ 
+                 content = self.flow.request.raw_content
++                if content and (
++                    yield from self.check_actual_body_size(True, True, len(content))
++                ):
++                    return
+                 done_after_headers = not (content or self.flow.request.trailers)
+                 yield SendHttp(
+                     RequestHeaders(
+@@ -444,16 +474,9 @@ class HttpStream(layer.Layer):
+     ) -> layer.CommandGenerator[None]:
+         assert self.flow.response
+         if isinstance(event, ResponseData):
+-            if callable(self.flow.response.stream):
+-                chunks = self.flow.response.stream(event.data)
+-                if isinstance(chunks, bytes):
+-                    chunks = [chunks]
+-            else:
+-                chunks = [event.data]
+-            for chunk in chunks:
+-                if self.context.options.store_streamed_bodies:
+-                    self.response_body_buf += chunk
+-                yield SendHttp(ResponseData(self.stream_id, chunk), self.context.client)
++            if (yield from self.check_actual_body_size(False, False, len(event.data))):
++                return
++            yield from self.forward_streamed_response_data(event.data)
+         elif isinstance(event, ResponseTrailers):
+             self.flow.response.trailers = event.trailers
+             # will be sent in send_response() after the response hook.
+@@ -465,6 +488,8 @@ class HttpStream(layer.Layer):
+                 elif isinstance(chunks, bytes):
+                     chunks = [chunks]
+                 for chunk in chunks:
++                    if (yield from self.check_actual_body_size(False, True, len(chunk))):
++                        return
+                     if self.context.options.store_streamed_bodies:
+                         self.response_body_buf += chunk
+                     yield SendHttp(
+@@ -475,11 +500,31 @@ class HttpStream(layer.Layer):
+                 self.response_body_buf.clear()
+             yield from self.send_response(already_streamed=True)
+ 
++    def forward_streamed_response_data(
++        self, data: bytes
++    ) -> layer.CommandGenerator[None]:
++        """Forward one already-counted response chunk and bound transformed output."""
++        assert self.flow.response
++        if callable(self.flow.response.stream):
++            chunks = self.flow.response.stream(data)
++            if isinstance(chunks, bytes):
++                chunks = [chunks]
++        else:
++            chunks = [data]
++        for chunk in chunks:
++            if (yield from self.check_actual_body_size(False, True, len(chunk))):
++                return
++            if self.context.options.store_streamed_bodies:
++                self.response_body_buf += chunk
++            yield SendHttp(ResponseData(self.stream_id, chunk), self.context.client)
++
+     @expect(ResponseData, ResponseTrailers, ResponseEndOfMessage)
+     def state_consume_response_body(
+         self, event: events.Event
+     ) -> layer.CommandGenerator[None]:
+         if isinstance(event, ResponseData):
++            if (yield from self.check_actual_body_size(False, False, len(event.data))):
++                return
+             self.response_body_buf += event.data
+             yield from self.check_body_size(False)
+         elif isinstance(event, ResponseTrailers):
+@@ -515,6 +560,10 @@ class HttpStream(layer.Layer):
+ 
+         if not already_streamed:
+             content = self.flow.response.raw_content
++            if content and (
++                yield from self.check_actual_body_size(False, True, len(content))
++            ):
++                return
+             done_after_headers = not (content or self.flow.response.trailers)
+             yield SendHttp(
+                 ResponseHeaders(self.stream_id, self.flow.response, done_after_headers),
+@@ -638,7 +687,7 @@ class HttpStream(layer.Layer):
+                     body_buf = bytes(self.request_body_buf)
+                     self.request_body_buf.clear()
+                     yield from self.start_request_stream()
+-                    yield from self.handle_event(RequestData(self.stream_id, body_buf))
++                    yield from self.forward_streamed_request_data(body_buf)
+             if response:
+                 assert self.flow.response
+                 self.flow.response.stream = True
+@@ -646,9 +695,52 @@ class HttpStream(layer.Layer):
+                     body_buf = bytes(self.response_body_buf)
+                     self.response_body_buf.clear()
+                     yield from self.start_response_stream()
+-                    yield from self.handle_event(ResponseData(self.stream_id, body_buf))
++                    yield from self.forward_streamed_response_data(body_buf)
+         return False
+ 
++    def check_actual_body_size(
++        self, request: bool, forwarded: bool, chunk_size: int
++    ) -> layer.CommandGenerator[bool]:
++        """Bound cumulative received and forwarded bytes for every body path."""
++        if chunk_size < 0:  # pragma: no cover - all callers pass len(bytes)
++            raise ValueError("body chunk size cannot be negative")
++
++        side = "request" if request else "response"
++        direction = "forwarded" if forwarded else "received"
++        field = f"{side}_body_{direction}_bytes"
++        total = getattr(self, field) + chunk_size
++        setattr(self, field, total)
++        limit = (
++            MAINTAINFLOW_MAX_REQUEST_BODY_BYTES
++            if request
++            else MAINTAINFLOW_MAX_RESPONSE_BODY_BYTES
++        )
++        if total <= limit:
++            return False
++
++        err_msg = (
++            f"{'Request' if request else 'Response'} body exceeds "
++            "Maintain Flow's cumulative actual-byte limit."
++        )
++        err_code = (
++            ErrorCode.REQUEST_TOO_LARGE if request else ErrorCode.RESPONSE_TOO_LARGE
++        )
++        self.flow.error = flow.Error(err_msg)
++        yield HttpErrorHook(self.flow)
++        yield SendHttp(
++            ResponseProtocolError(self.stream_id, err_msg, err_code),
++            self.context.client,
++        )
++        self.client_state = self.state_errored
++        if self.context.server.connected:
++            yield SendHttp(
++                RequestProtocolError(self.stream_id, err_msg, err_code),
++                self.context.server,
++            )
++        self.server_state = self.state_errored
++        self.flow.live = False
++        return True
++
+     def check_invalid(self, request: bool) -> layer.CommandGenerator[bool]:
+         err: str | None = None
+         if request:
+diff --git a/test/mitmproxy/proxy/layers/http/test_http.py b/test/mitmproxy/proxy/layers/http/test_http.py
+index 91085e7..6250e0c 100644
+--- a/test/mitmproxy/proxy/layers/http/test_http.py
++++ b/test/mitmproxy/proxy/layers/http/test_http.py
+@@ -1865,3 +1865,222 @@ def test_drop_stream_with_paused_events(tctx):
+         << SendData(tctx.client, BytesMatching(b"502 Bad Gateway.+Connection killed"))
+         << CloseConnection(tctx.client)
+     )
++
++
++@pytest.mark.parametrize("where", ["request", "response"])
++def test_maintainflow_streamed_actual_body_limit(tctx, monkeypatch, where):
++    """Unknown or dishonest lengths cannot bypass cumulative stream limits."""
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_REQUEST_BODY_BYTES", 3)
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_RESPONSE_BODY_BYTES", 3)
++    tctx.options.stream_large_bodies = "1"
++    tctx.options.body_size_limit = "20m"
++    server = Placeholder(Server)
++    flow = Placeholder(HTTPFlow)
++    playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
++
++    if where == "request":
++        assert (
++            playbook
++            >> DataReceived(
++                tctx.client,
++                b"POST http://example.com/ HTTP/1.1\r\n"
++                b"Host: example.com\r\nTransfer-Encoding: chunked\r\n\r\n"
++                b"2\r\nab\r\n",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply()
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(
++                server,
++                b"POST / HTTP/1.1\r\nHost: example.com\r\n"
++                b"Transfer-Encoding: chunked\r\n\r\n2\r\nab\r\n",
++            )
++            >> DataReceived(tctx.client, b"2\r\ncd\r\n")
++            << http.HttpErrorHook(flow)
++            >> reply()
++            << SendData(tctx.client, BytesMatching(b"413 Payload Too Large"))
++            << CloseConnection(tctx.client)
++            << CloseConnection(server)
++        )
++    else:
++        assert (
++            playbook
++            >> DataReceived(
++                tctx.client,
++                b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply()
++            << http.HttpRequestHook(flow)
++            >> reply()
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(server, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
++            >> DataReceived(
++                server,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n",
++            )
++            << http.HttpResponseHeadersHook(flow)
++            >> reply()
++            << SendData(
++                tctx.client,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n",
++            )
++            >> DataReceived(server, b"2\r\ncd\r\n")
++            << http.HttpErrorHook(flow)
++            >> reply()
++            << CloseConnection(tctx.client)
++            << CloseConnection(server)
++        )
++
++    assert flow().error
++    assert "cumulative actual-byte limit" in flow().error.msg
++    assert not flow().live
++
++
++@pytest.mark.parametrize("where", ["request", "response"])
++def test_maintainflow_streamed_actual_body_exact_boundary(tctx, monkeypatch, where):
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_REQUEST_BODY_BYTES", 3)
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_RESPONSE_BODY_BYTES", 3)
++    tctx.options.stream_large_bodies = "1"
++    tctx.options.body_size_limit = "20m"
++    server = Placeholder(Server)
++    flow = Placeholder(HTTPFlow)
++
++    if where == "request":
++        assert (
++            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
++            >> DataReceived(
++                tctx.client,
++                b"POST http://example.com/ HTTP/1.1\r\n"
++                b"Host: example.com\r\nContent-Length: 3\r\n\r\nabc",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply()
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(
++                server,
++                b"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\nabc",
++            )
++            << http.HttpRequestHook(flow)
++            >> reply()
++            >> DataReceived(
++                server, b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
++            )
++            << http.HttpResponseHeadersHook(flow)
++            >> reply()
++            << http.HttpResponseHook(flow)
++            >> reply()
++            << SendData(
++                tctx.client,
++                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
++            )
++        )
++    else:
++        assert (
++            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
++            >> DataReceived(
++                tctx.client,
++                b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply()
++            << http.HttpRequestHook(flow)
++            >> reply()
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(server, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
++            >> DataReceived(
++                server,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
++                b"2\r\nab\r\n1\r\nc\r\n0\r\n\r\n",
++            )
++            << http.HttpResponseHeadersHook(flow)
++            >> reply()
++            << SendData(
++                tctx.client,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
++                b"2\r\nab\r\n1\r\nc\r\n",
++            )
++            << http.HttpResponseHook(flow)
++            >> reply()
++            << SendData(tctx.client, b"0\r\n\r\n")
++        )
++
++    assert flow().error is None
++
++
++@pytest.mark.parametrize("where", ["request", "response"])
++def test_maintainflow_stream_transform_cannot_expand_past_limit(
++    tctx, monkeypatch, where
++):
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_REQUEST_BODY_BYTES", 3)
++    monkeypatch.setattr(http, "MAINTAINFLOW_MAX_RESPONSE_BODY_BYTES", 3)
++    server = Placeholder(Server)
++    flow = Placeholder(HTTPFlow)
++    playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
++
++    def expand_stream(active_flow: HTTPFlow):
++        if active_flow.response is None:
++            active_flow.request.stream = lambda chunk: chunk * 2
++        else:
++            active_flow.response.stream = lambda chunk: chunk * 2
++
++    if where == "request":
++        assert (
++            playbook
++            >> DataReceived(
++                tctx.client,
++                b"POST http://example.com/ HTTP/1.1\r\n"
++                b"Host: example.com\r\nTransfer-Encoding: chunked\r\n\r\n"
++                b"2\r\nab\r\n",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply(side_effect=expand_stream)
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(
++                server,
++                b"POST / HTTP/1.1\r\nHost: example.com\r\n"
++                b"Transfer-Encoding: chunked\r\n\r\n",
++            )
++            << http.HttpErrorHook(flow)
++            >> reply()
++            << SendData(tctx.client, BytesMatching(b"413 Payload Too Large"))
++            << CloseConnection(tctx.client)
++            << CloseConnection(server)
++        )
++    else:
++        assert (
++            playbook
++            >> DataReceived(
++                tctx.client,
++                b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
++            )
++            << http.HttpRequestHeadersHook(flow)
++            >> reply()
++            << http.HttpRequestHook(flow)
++            >> reply()
++            << OpenConnection(server)
++            >> reply(None)
++            << SendData(server, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
++            >> DataReceived(
++                server,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n",
++            )
++            << http.HttpResponseHeadersHook(flow)
++            >> reply(side_effect=expand_stream)
++            << SendData(
++                tctx.client,
++                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
++            )
++            << http.HttpErrorHook(flow)
++            >> reply()
++            << CloseConnection(tctx.client)
++            << CloseConnection(server)
++        )
++
++    assert flow().error
++    assert "cumulative actual-byte limit" in flow().error.msg

@@ -53,6 +53,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { getScreenSummary, type ScreenKey } from "@/data/maintainflow"
 import { trackProductEvent } from "@/lib/analytics/product-events"
+import { createIdempotencyKey } from "@/lib/api/business-evals-client"
 import { getEffectiveBillingPlan, resolveBillingEntitlement } from "@/lib/billing/entitlements"
 import {
   annualBillingDiscountPercent,
@@ -65,6 +66,7 @@ import {
   type BillingInterval,
   type BillingPlanId,
 } from "@/lib/billing/plans"
+import { reconcileStripeCheckoutFromBrowser } from "@/lib/billing/stripe-checkout-client"
 import { parseCurlCommand } from "@/lib/core/curl"
 import { buildHealthTrendData } from "@/lib/core/dashboard-metrics"
 import { workflowAssuranceFromServiceRuns } from "@/lib/core/evidence-provenance"
@@ -182,8 +184,10 @@ const workflowSetupMethods: Array<{
 
 type BillingStatus = {
   secretConfigured: boolean
+  webhookConfigured: boolean
   prices: Record<BillingPlanId, boolean>
   annualPrices: Record<BillingPlanId, boolean>
+  publicPricesConfigured: boolean
   checkoutConfigured: boolean
   portalConfigured: boolean
   workspaceTrialDays?: number
@@ -1108,6 +1112,7 @@ function SettingsScreen({ core }: { core: Core }) {
   const [billingInterval, setBillingInterval] = useState<BillingInterval>("monthly")
   const requestedSettingsTab = searchParams.get("tab")
   const billingReturn = searchParams.get("billing")
+  const checkoutSessionId = searchParams.get("session_id") ?? ""
   const defaultSettingsTab = ["profile", "reports", "billing", "team"].includes(requestedSettingsTab ?? "")
     ? requestedSettingsTab ?? "profile"
     : "profile"
@@ -1133,7 +1138,10 @@ function SettingsScreen({ core }: { core: Core }) {
     && recommendedUpgradePlan.checkoutEligible
     && canCheckoutPlan(recommendedUpgradePlanId)
   const portalAvailable = Boolean(billingStatus?.portalConfigured && core.agency?.stripeCustomerId)
-  const subscriptionUpdateAvailable = Boolean(portalAvailable && existingSubscriptionNeedsPortal)
+  const grandfatheredSubscription = Boolean(billingEntitlement?.grandfathered)
+  const subscriptionUpdateAvailable = Boolean(
+    portalAvailable && existingSubscriptionNeedsPortal && !grandfatheredSubscription
+  )
   const upgradeReason = billingStatus
     ? existingSubscriptionNeedsPortal
       ? "Use Stripe Customer Portal to manage the existing subscription before starting another checkout."
@@ -1180,8 +1188,10 @@ function SettingsScreen({ core }: { core: Core }) {
         if (!cancelled) {
           setBillingStatus({
             secretConfigured: false,
+            webhookConfigured: false,
             prices: { free: false, starter: false, growth: false, scale: false, agency_plus: false },
             annualPrices: { free: false, starter: false, growth: false, scale: false, agency_plus: false },
+            publicPricesConfigured: false,
             checkoutConfigured: false,
             portalConfigured: false,
             workspaceTrialDays: cardFreeWorkspaceTrialDays,
@@ -1205,13 +1215,11 @@ function SettingsScreen({ core }: { core: Core }) {
       return
     }
 
-    if (billingReturn !== "checkout-success" && billingReturn !== "portal-return") return
+    if (billingReturn !== "portal-return") return
 
     let cancelled = false
     let successfulRefresh = false
-    const returnMessage = billingReturn === "checkout-success"
-      ? "Checkout completed. Finished checking for Stripe's latest billing status."
-      : "Returned from Stripe customer portal. Finished checking for Stripe's latest billing status."
+    const returnMessage = "Returned from Stripe customer portal. Finished checking for Stripe's latest billing status."
 
     setBillingMessage({ tone: "success", text: "Refreshing the latest Stripe billing status..." })
     const refreshWorkspace = async (finalAttempt: boolean) => {
@@ -1243,6 +1251,57 @@ function SettingsScreen({ core }: { core: Core }) {
       retryIds.forEach((retryId) => window.clearTimeout(retryId))
     }
   }, [billingReturn, reloadWorkspace])
+
+  useEffect(() => {
+    if (billingReturn !== "checkout-success") return
+    const workspaceId = core.agency?.id
+    if (!checkoutSessionId) {
+      setBillingMessage({
+        tone: "error",
+        text: "Stripe returned without a Checkout Session ID, so Maintain Flow did not change paid access.",
+      })
+      return
+    }
+    if (!workspaceId) return
+
+    let cancelled = false
+    let settled = false
+    setBillingMessage({ tone: "success", text: "Confirming this exact Stripe Checkout Session..." })
+    const reconcile = async (finalAttempt: boolean) => {
+      if (cancelled || settled) return
+      try {
+        const result = await reconcileStripeCheckoutFromBrowser({ workspaceId, sessionId: checkoutSessionId })
+        if (result.status === "active") {
+          settled = true
+          await reloadWorkspace()
+          if (!cancelled) setBillingMessage({ tone: "success", text: result.message })
+          return
+        }
+        if (result.status === "expired") {
+          settled = true
+          if (!cancelled) setBillingMessage({ tone: "error", text: result.message })
+          return
+        }
+        if (finalAttempt && !cancelled) setBillingMessage({ tone: "success", text: result.message })
+      } catch (error) {
+        if (finalAttempt && !cancelled) {
+          setBillingMessage({
+            tone: "error",
+            text: error instanceof Error ? error.message : "Stripe checkout could not be confirmed.",
+          })
+        }
+      }
+    }
+
+    void reconcile(false)
+    const retryIds = [1_500, 3_000, 5_000].map((delay, index, delays) => window.setTimeout(() => {
+      void reconcile(index === delays.length - 1)
+    }, delay))
+    return () => {
+      cancelled = true
+      retryIds.forEach((retryId) => window.clearTimeout(retryId))
+    }
+  }, [billingReturn, checkoutSessionId, core.agency?.id, reloadWorkspace])
 
   function canCheckoutPlan(planId: BillingPlanId) {
     return Boolean(
@@ -1318,6 +1377,9 @@ function SettingsScreen({ core }: { core: Core }) {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
           "X-MaintainFlow-Workspace-Id": core.agency.id,
+          ...(path === "/api/billing/checkout"
+            ? { "Idempotency-Key": createIdempotencyKey(`billing-checkout:${body.plan ?? "unknown"}:${body.interval ?? "monthly"}`) }
+            : {}),
         },
         body: JSON.stringify(body),
       })
@@ -1451,7 +1513,7 @@ function SettingsScreen({ core }: { core: Core }) {
                 {currentPlan.checkoutEligible ? (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {trialInfo
-                      ? `${trialInfo.daysLeftLabel} left in the paid plan trial. Manage cancellation or payment details in Stripe Customer Portal.`
+                      ? `${trialInfo.daysLeftLabel} left in the card-free Team trial. Stripe Customer Portal is only for a separately linked paid subscription.`
                       : "Manage billing, cancellation, and payment details in Stripe Customer Portal."}
                   </p>
                 ) : (
@@ -1463,11 +1525,15 @@ function SettingsScreen({ core }: { core: Core }) {
                   {existingSubscriptionNeedsPortal ? (
                     <Button
                       type="button"
-                      onClick={() => openPortal("subscription_update")}
-                      disabled={!subscriptionUpdateAvailable || !!openingBilling}
+                      onClick={() => openPortal(grandfatheredSubscription ? "manage" : "subscription_update")}
+                      disabled={!(grandfatheredSubscription ? portalAvailable : subscriptionUpdateAvailable) || !!openingBilling}
                     >
                       <IconCreditCard data-icon="inline-start" />
-                      {openingBilling === "portal-update" ? "Opening plan options..." : "Change plan in Stripe"}
+                      {openingBilling === "portal-update" || openingBilling === "portal"
+                        ? "Opening Stripe..."
+                        : grandfatheredSubscription
+                          ? "Manage billing in Stripe"
+                          : "Change plan in Stripe"}
                       <IconExternalLink data-icon="inline-end" />
                     </Button>
                   ) : (
@@ -1485,9 +1551,11 @@ function SettingsScreen({ core }: { core: Core }) {
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
                   {existingSubscriptionNeedsPortal
-                    ? "Opens Stripe's self-serve plan selector for the subscription linked to this workspace."
+                    ? grandfatheredSubscription
+                      ? "Payment details and cancellation remain self-serve. Your existing price and capacity stay grandfathered until an explicit migration is agreed."
+                      : "Opens Stripe's self-serve plan selector for the subscription linked to this workspace."
                     : upgradeCheckoutAvailable
-                    ? `Opens Stripe Checkout for ${recommendedUpgradePlan.name} on ${billingInterval} billing. The paid subscription begins at checkout.`
+                    ? `Opens Stripe Checkout for ${recommendedUpgradePlan.name} on ${billingInterval} billing. Paid capacity applies only after Stripe's signed webhook confirms an eligible subscription.`
                     : upgradeReason}
                 </p>
               </div>

@@ -95,7 +95,7 @@ export const billingPlans: Record<BillingPlanId, BillingPlan> = {
     name: "Solo",
     price: "€49/month",
     monthlyPriceEur: 49,
-    description: "For one operator running recurring business evals across a small client portfolio.",
+    description: "For one operator running recurring business evals across a small project portfolio.",
     businessEvalLimits: { projects: 3, journeys: 5, runsPerMonth: 750, evidenceRetentionDays: 30, seats: 2 },
     features: paidFeatures,
     limits: { clients: 3, workflows: 5, reportsPerMonth: null },

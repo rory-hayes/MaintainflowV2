@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils"
 import { IconAlertCircle, IconCircle, IconCircleCheck } from "@tabler/icons-react"
+import { useEffect, useRef } from "react"
 import type { JourneyStage } from "./types"
 import { StatusLabel } from "./status-ui"
 
@@ -14,8 +15,18 @@ export function JourneyStageRail({
   selectedId: string
   onSelect: (id: string) => void
 }) {
+  const railRef = useRef<HTMLDivElement>(null)
+  const selectedStageRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    const rail = railRef.current
+    const selectedStage = selectedStageRef.current
+    if (!rail || !selectedStage || rail.scrollWidth <= rail.clientWidth) return
+    selectedStage.scrollIntoView({ behavior: "auto", block: "nearest", inline: "center" })
+  }, [selectedId, stages.length])
+
   return (
-    <div className="mb-6 snap-x snap-mandatory overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div ref={railRef} className="mb-6 snap-x snap-mandatory overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <ol aria-label="Journey stages" className="flex min-w-max items-center px-1 lg:justify-center">
         {stages.map((stage, index) => {
           const active = stage.id === selectedId
@@ -23,10 +34,11 @@ export function JourneyStageRail({
             <li key={stage.id} className="flex shrink-0 items-center">
               <button
                 type="button"
+                ref={active ? selectedStageRef : undefined}
                 onClick={() => onSelect(stage.id)}
                 aria-current={active ? "step" : undefined}
                 className={cn(
-                  "h-[166px] w-[198px] snap-start rounded-[9px] border bg-white p-5 text-left shadow-none outline-none transition hover:border-slate-400 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2",
+                  "h-[166px] w-[198px] snap-start rounded-[9px] border bg-white p-5 text-left shadow-none outline-none transition hover:border-slate-400 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 min-[1400px]:w-[180px] min-[1400px]:px-4",
                   active ? "border-amber-500 bg-amber-50/25" : "border-slate-300",
                 )}
               >
@@ -37,7 +49,7 @@ export function JourneyStageRail({
                   (stage.status === "inconclusive" || stage.status === "cancelled" || stage.status === "not_run") && "bg-slate-100 text-slate-600",
                   (stage.status === "running" || stage.status === "queued") && "bg-blue-100 text-blue-700",
                 )}>{index + 1}</span>
-                <span className="block truncate text-base font-semibold tracking-[-0.015em] text-slate-950">{stage.name}</span>
+                <span className="block truncate text-base font-semibold tracking-[-0.015em] text-slate-950 min-[1400px]:text-sm">{stage.name}</span>
                 <StatusLabel status={stage.status} className="mt-2" />
                 <span className="mt-2 block text-sm text-slate-700">{stage.duration ?? "—"}</span>
                 {stage.threshold ? <span className="mt-0.5 block text-xs text-slate-500">{stage.threshold}</span> : null}
@@ -59,7 +71,7 @@ function StageConnector({ status }: { status: JourneyStage["status"] }) {
     <span
       aria-hidden="true"
       className={cn(
-        "relative block h-px w-[89px] shrink-0",
+        "relative block h-px w-[89px] shrink-0 min-[1400px]:w-[58px]",
         passed && "bg-emerald-600",
         alert && "bg-amber-600",
         !passed && !alert && "border-t border-dashed border-slate-400",

@@ -10,6 +10,11 @@ import type {
   OpsRecentWorkflow,
 } from "@/lib/ops/types"
 import { getSupabaseServerConfig } from "@/lib/supabase/server"
+import {
+  isSupabasePublicApiKey,
+  isSupabaseServiceApiKey,
+  supabaseServiceAuthHeaders,
+} from "@/lib/supabase/api-key-roles"
 
 type Row = Record<string, unknown>
 
@@ -174,8 +179,11 @@ function providerHealth(input: {
   const stripeSecret = Boolean(process.env.STRIPE_SECRET_KEY)
   const stripeWebhook = Boolean(process.env.STRIPE_WEBHOOK_SECRET)
   const cronSecret = Boolean(process.env.CRON_SECRET)
-  const supabasePublic = Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-  const serviceRole = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY)
+  const supabasePublic = Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL
+    && isSupabasePublicApiKey(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+  )
+  const serviceRole = isSupabaseServiceApiKey(process.env.SUPABASE_SERVICE_ROLE_KEY)
 
   return [
     provider("Supabase", input.supabaseReady && serviceRole ? "healthy" : supabasePublic ? "attention" : "missing", input.supabaseReady ? "Service-role reads and Auth verification are responding." : "Set Supabase URL, anon key, and service role before launch.", serviceRole ? "Service role ready" : "Service role missing"),
@@ -259,8 +267,7 @@ async function serviceFetch(path: string, init: RequestInit = {}) {
   const response = await fetch(`${config.restUrl}/${path}`, {
     ...init,
     headers: {
-      apikey: config.serviceRoleKey,
-      Authorization: `Bearer ${config.serviceRoleKey}`,
+      ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       ...(init.headers ?? {}),
     },
   })

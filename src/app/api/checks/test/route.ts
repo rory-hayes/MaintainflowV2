@@ -1,6 +1,7 @@
 import { runEndpointTest } from "@/lib/core/check-runner"
 import { createFixedWindowRateLimiter } from "@/lib/core/rate-limit"
-import type { AssertionConfig, EndpointTestInput, WorkflowMethod } from "@/lib/core/types"
+import type { AssertionConfig, EndpointTestInput } from "@/lib/core/types"
+import { BoundedJsonRequestError, readBoundedJson } from "@/lib/http/bounded-json.server"
 import { recordRateLimitEvent } from "@/lib/ops/rate-limit-events.server"
 import { PersistedCheckError, runAndPersistAuthorizedCheck } from "@/lib/supabase/persisted-check.server"
 import { bearerToken } from "@/lib/supabase/report-download.server"
@@ -11,16 +12,15 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
-const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"])
 const endpointTestLimiter = createFixedWindowRateLimiter({ limit: 30, windowMs: 60_000 })
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json()
     const auth = await endpointTestAuth(request)
     if (!auth.ok) {
       return endpointTestError(auth.message, 401)
     }
+    const body = await readBoundedJson(request, 32_768)
 
     const persistedCheckId = checkIdFromBody(body)
     const input = persistedCheckId ? null : normalizeInput(body)
@@ -47,7 +47,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return endpointTestError(
       error instanceof Error ? error.message : "Check request was invalid.",
-      error instanceof PersistedCheckError ? error.status : 400
+      error instanceof BoundedJsonRequestError
+        ? error.status
+        : error instanceof PersistedCheckError
+          ? error.status
+          : 400
     )
   }
 }
@@ -126,16 +130,22 @@ function normalizeInput(value: unknown): EndpointTestInput {
   const input = value as Partial<EndpointTestInput>
   const method = String(input.method ?? "GET").toUpperCase()
 
-  if (!allowedMethods.has(method)) {
-    throw new Error("Unsupported HTTP method.")
+  if (method !== "GET") {
+    throw new Error("Endpoint tests support public GET requests only.")
+  }
+  if (String(input.body ?? "").trim()) {
+    throw new Error("Endpoint tests do not accept request bodies.")
+  }
+  if (Object.keys(normalizeHeaders(input.headers)).length > 0) {
+    throw new Error("Endpoint tests do not accept custom headers.")
   }
 
   return {
     rateLimitKey: String(input.rateLimitKey ?? ""),
     url: String(input.url ?? ""),
-    method: method as WorkflowMethod,
-    headers: normalizeHeaders(input.headers),
-    body: String(input.body ?? ""),
+    method: "GET",
+    headers: {},
+    body: "",
     expectedStatus: numberInRange(input.expectedStatus, 100, 599, 200),
     timeoutSeconds: numberInRange(input.timeoutSeconds, 1, 30, 10),
     maxLatencyMs: numberInRange(input.maxLatencyMs, 100, 60_000, 5_000),

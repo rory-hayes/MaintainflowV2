@@ -2,6 +2,7 @@ import "server-only"
 
 import { EVAL_EVIDENCE_BUCKET, isEvalEvidencePathForWorkspace } from "@/lib/runner/evidence-storage.server"
 import { getSupabaseServerConfig, supabaseServiceJson } from "@/lib/supabase/server"
+import { supabaseServiceAuthHeaders } from "@/lib/supabase/api-key-roles"
 
 type EvidenceRow = {
   id: string
@@ -23,8 +24,7 @@ export async function purgeExpiredEvalEvidence(maxBatch = 50) {
   const storageResponse = await fetch(`${config.supabaseUrl}/storage/v1/object/${EVAL_EVIDENCE_BUCKET}`, {
     method: "DELETE",
     headers: {
-      apikey: config.serviceRoleKey,
-      Authorization: `Bearer ${config.serviceRoleKey}`,
+      ...supabaseServiceAuthHeaders(config.serviceRoleKey),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ prefixes: validRows.map((row) => row.storage_path) }),

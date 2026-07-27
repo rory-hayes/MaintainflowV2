@@ -1,4 +1,5 @@
 import { InboundWebhookError, processResendInboundWebhook } from "@/lib/email/resend-inbound.server"
+import { safeServerLog } from "@/lib/observability/safe-server-log"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -17,7 +18,7 @@ export async function POST(request: Request) {
     if (error instanceof InboundWebhookError) {
       return Response.json({ ok: false, error: { code: error.code, message: error.message } }, { status: error.status })
     }
-    console.error("[resend-inbound]", error instanceof Error ? error.message : "unknown error")
+    safeServerLog("error", "resend-inbound-failure", { reference: crypto.randomUUID() })
     return Response.json({ ok: false, error: { code: "INBOUND_FAILED", message: "The inbound email event could not be accepted." } }, { status: 500 })
   }
 }

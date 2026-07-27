@@ -36,7 +36,7 @@ test("owner attestation is agency and project scoped without fake domain verific
 
 test("immutable version, stage, schedule, run, and private evidence contracts are complete", () => {
   for (const table of [
-    "journey_versions", "journey_stage_definitions", "journey_schedules", "eval_runs", "eval_stage_runs",
+    "journey_versions", "journey_stage_definitions", "journey_schedules", "eval_runs", "browser_context_leases", "eval_stage_runs",
     "eval_run_side_effect_attempts", "eval_rate_limit_buckets", "evidence_artifacts", "inbound_email_events", "eval_email_receiving_health_events", "provider_webhook_receipts", "alert_endpoints", "alert_deliveries", "eval_alert_outbox", "report_share_links",
   ]) {
     assert.match(migration, new RegExp(`create table if not exists public\\.${table}`))
@@ -172,8 +172,8 @@ test("canonical fresh schema includes the additive business-evals foundation", (
   assert.equal(schema.trim().endsWith("commit;"), true, "Fresh schema must commit its top-level transaction.")
   for (const contract of [
     "project_kind", "journey_template", "journey_versions", "journey_stage_definitions", "journey_schedules",
-    "eval_runs", "eval_run_side_effect_attempts", "eval_rate_limit_buckets", "eval_stage_runs", "evidence_artifacts", "eval_alert_outbox", "report_share_links", "publish_journey_version",
-    "finalize_business_eval_run",
+    "eval_runs", "browser_context_leases", "eval_run_side_effect_attempts", "eval_rate_limit_buckets", "eval_stage_runs", "evidence_artifacts", "eval_alert_outbox", "report_share_links", "publish_journey_version",
+    "finalize_business_eval_run", "record_business_eval_incident_repair",
   ]) {
     assert.ok(schema.includes(contract), `Fresh schema is missing ${contract}`)
   }
@@ -181,7 +181,7 @@ test("canonical fresh schema includes the additive business-evals foundation", (
   const migrationBody = migration.slice(migration.indexOf("alter table public.agencies"), migration.lastIndexOf("commit;")).trim()
   const schemaBody = schema.slice(
     schema.indexOf("alter table public.agencies", schema.indexOf("-- Business-evals fresh-schema extension")),
-    schema.lastIndexOf("commit;"),
+    schema.indexOf("-- Browser-provider cost-control fresh-schema extension"),
   ).trim()
   assert.equal(schemaBody, migrationBody, "Fresh schema business-evals block must exactly match the migration body.")
 })

@@ -30,6 +30,15 @@ try {
   const migration = readFileSync("supabase/maintainflow_business_evals_migration.sql", "utf8")
   await database.query(migration)
   await database.query(migration)
+  const browserProviderCostControlsMigration = readFileSync(
+    "supabase/maintainflow_browser_provider_cost_controls_migration.sql",
+    "utf8"
+  )
+  await database.query(browserProviderCostControlsMigration)
+  await database.query(browserProviderCostControlsMigration)
+  const legalAcceptanceMigration = readFileSync("supabase/maintainflow_legal_acceptances_migration.sql", "utf8")
+  await database.query(legalAcceptanceMigration)
+  await database.query(legalAcceptanceMigration)
   const after = await legacySnapshot(database, ids)
 
   assert.deepEqual(after.counts, before.counts, "The additive migration must not drop or duplicate legacy rows.")
@@ -53,6 +62,18 @@ try {
   const safetyProof = await proveQueuedKillAndCaptchaSafety(database, ids)
   const archiveProof = await proveJourneyArchiveRestore(database, ids)
   const lifecycleProof = await proveBusinessEvalsLifecycle(database, ids)
+  const aiActorRemovalProof = await proveAiActorAttributionSurvivesMembershipRemoval(
+    database,
+    ids,
+    lifecycleProof.projectId,
+  )
+  const browserProviderCostProof = await proveBrowserProviderCostControls(database, ids)
+  const stripeCheckoutProof = await proveStripeCheckoutReservationConcurrency(
+    database,
+    databaseUrl(adminUrl, databaseName),
+    ids
+  )
+  const legalAcceptanceProof = await proveLegalAcceptanceLifecycle(database, ids)
 
   process.stdout.write(`${JSON.stringify({
     result: "passed",
@@ -70,13 +91,40 @@ try {
     journeyArchiveTenantBoundaryDenied: archiveProof.crossTenantDenied,
     launchTemplatesPublished: lifecycleProof.launchTemplatesPublished,
     supervisedSchedulesEnabled: lifecycleProof.supervisedSchedulesEnabled,
+    scheduledRunFinalizedWithoutUser: lifecycleProof.scheduledRunFinalizedWithoutUser,
     incidentRecoveryVerified: lifecycleProof.incidentRecoveryVerified,
     cancellationReplaySafe: lifecycleProof.cancellationReplaySafe,
     reportSnapshotCreated: lifecycleProof.reportSnapshotCreated,
     shareLinkRevoked: lifecycleProof.shareLinkRevoked,
     shareRevocationReplaySafe: lifecycleProof.shareRevocationReplaySafe,
     hardRunQuotaEnforced: lifecycleProof.hardRunQuotaEnforced,
+    removedAiActorAttributionRetained: aiActorRemovalProof.removedActorAttributionRetained,
+    removedAiActorAccessRevoked: aiActorRemovalProof.removedActorAccessRevoked,
+    browserProviderUsageRecorded: browserProviderCostProof.usageRecorded,
+    browserProviderCeilingBlocked: browserProviderCostProof.ceilingBlocked,
+    browserProviderCounterResetFailedClosed: browserProviderCostProof.counterResetFailedClosed,
+    browserProviderTenantBoundaryDenied: browserProviderCostProof.tenantBoundaryDenied,
+    browserProviderDelayedTerminalResolved: browserProviderCostProof.delayedTerminalResolved,
+    browserProviderMeteringRetryEscalated: browserProviderCostProof.meteringRetryEscalated,
+    browserProviderSamplingRaceSafe: browserProviderCostProof.samplingRaceSafe,
+    browserProviderActiveLeaseRaceSafe: browserProviderCostProof.activeLeaseRaceSafe,
+    browserProviderPermanentRecoveryAudited: browserProviderCostProof.permanentRecoveryAudited,
+    browserProviderRecoveryActorBoundaryDenied: browserProviderCostProof.recoveryActorBoundaryDenied,
+    browserProviderCreationCrashRecovered: browserProviderCostProof.creationCrashRecovered,
     publishContractParity: lifecycleProof.publishContractParity,
+    stripeCheckoutSingleActiveReservation: stripeCheckoutProof.singleActiveReservation,
+    stripeCheckoutConcurrentWinnerStable: stripeCheckoutProof.concurrentWinnerStable,
+    stripeCheckoutProviderKeyStable: stripeCheckoutProof.providerKeyStable,
+    stripeCheckoutTenantBoundaryDenied: stripeCheckoutProof.tenantBoundaryDenied,
+    existingUsersNotBackfilled: legalAcceptanceProof.existingUsersNotBackfilled,
+    emailSignupAcceptanceRecorded: legalAcceptanceProof.emailSignupAcceptanceRecorded,
+    emailSignupRequiresActivation: legalAcceptanceProof.emailSignupRequiresActivation,
+    confirmedEmailSignupCanJoinWorkspace: legalAcceptanceProof.confirmedEmailSignupCanJoinWorkspace,
+    directSignupWithoutAcceptanceRejected: legalAcceptanceProof.directSignupWithoutAcceptanceRejected,
+    pendingInvitePreservedWithoutFalseAcceptance: legalAcceptanceProof.pendingInvitePreservedWithoutFalseAcceptance,
+    inviteActivationAcceptanceRecorded: legalAcceptanceProof.inviteActivationAcceptanceRecorded,
+    oauthAcceptanceIdempotent: legalAcceptanceProof.oauthAcceptanceIdempotent,
+    unacceptedMembershipDenied: legalAcceptanceProof.unacceptedMembershipDenied,
   }, null, 2)}\n`)
 } finally {
   if (database) await database.end().catch(() => undefined)
@@ -88,6 +136,442 @@ try {
     await admin.query(`drop database if exists "${databaseName}"`).catch(() => undefined)
     await admin.end().catch(() => undefined)
   }
+}
+
+async function proveBrowserProviderCostControls(client, ids) {
+  const projectKey = "c".repeat(64)
+  const firstSampler = `usage-sample-a-${randomUUID()}`
+  const secondSampler = `usage-sample-b-${randomUUID()}`
+  assert.equal((await claimBrowserProviderProjectUsage(client, projectKey, firstSampler)).claimed, true)
+  assert.equal((await claimBrowserProviderProjectUsage(client, projectKey, secondSampler)).claimed, false)
+  await assert.rejects(
+    recordClaimedBrowserProviderProjectUsage(client, {
+      projectKey,
+      workerId: secondSampler,
+      browserMinutes: 9,
+      proxyBytes: 900,
+    }),
+    /BROWSER_PROVIDER_USAGE_SAMPLE_LEASE_INVALID/
+  )
+  const initial = await recordClaimedBrowserProviderProjectUsage(client, {
+    projectKey,
+    workerId: firstSampler,
+    browserMinutes: 10,
+    proxyBytes: 1_000,
+  })
+  assert.equal(initial.control_status, "healthy")
+  assert.equal(initial.may_create_session, true)
+
+  const staleSampler = `usage-sample-stale-${randomUUID()}`
+  const replacementSampler = `usage-sample-replacement-${randomUUID()}`
+  assert.equal((await claimBrowserProviderProjectUsage(client, projectKey, staleSampler)).claimed, true)
+  const contendedDailyClaim = (await client.query(
+    "select * from public.claim_browser_provider_daily_reconciliation($1,$2,$3,$4,$5,$6)",
+    [projectKey, `daily-contender-${randomUUID()}`, 100, 100_000, 80, 120]
+  )).rows[0]
+  assert.equal(contendedDailyClaim.claimed, false)
+  assert.equal(contendedDailyClaim.may_create_session, false)
+  await client.query(
+    "update public.browser_provider_cost_controls set usage_sample_claim_expires_at=clock_timestamp()-interval '1 second' where project_key=$1",
+    [projectKey]
+  )
+  assert.equal((await claimBrowserProviderProjectUsage(client, projectKey, replacementSampler)).claimed, true)
+  await assert.rejects(
+    recordClaimedBrowserProviderProjectUsage(client, {
+      projectKey,
+      workerId: staleSampler,
+      browserMinutes: 11,
+      proxyBytes: 1_100,
+    }),
+    /BROWSER_PROVIDER_USAGE_SAMPLE_LEASE_INVALID/
+  )
+  await recordClaimedBrowserProviderProjectUsage(client, {
+    projectKey,
+    workerId: replacementSampler,
+    browserMinutes: 11,
+    proxyBytes: 1_100,
+  })
+
+  const run = (await client.query(
+    "select id from public.eval_runs where agency_id=$1 order by created_at asc limit 1",
+    [ids.agencyId]
+  )).rows[0]
+  assert.ok(run?.id, "Browser provider accounting requires an acceptance eval run.")
+  const startedAt = new Date(Date.now() - 90_000).toISOString()
+  const endedAt = new Date(Date.parse(startedAt) + 90_000).toISOString()
+  const sessionId = `bb-acceptance-${randomUUID()}`
+  const registration = await prepareAndRegisterBrowserProviderSession(client, {
+    projectKey,
+    sessionId,
+    evalRunId: run.id,
+  })
+  assert.equal(registration.row.metering_state, "active")
+  assert.equal(registration.row.replayed, false)
+  assert.equal((await client.query(
+    "select * from public.claim_browser_provider_session_metering($1,$2,$3,$4)",
+    [projectKey, `scheduler-race-${randomUUID()}`, 4, 120]
+  )).rowCount, 0, "The scheduler must not steal an active request's metering row.")
+  const begun = (await client.query(
+    "select * from public.begin_browser_provider_session_terminal_metering($1,$2,$3,$4)",
+    [projectKey, sessionId, registration.workerId, 30]
+  )).rows[0]
+  assert.equal(begun.metering_state, "pending")
+  assert.equal((await client.query(
+    "select * from public.claim_browser_provider_session_metering($1,$2,$3,$4)",
+    [projectKey, `scheduler-terminal-race-${randomUUID()}`, 4, 120]
+  )).rowCount, 0, "The scheduler must not steal the immediate terminal poll lease.")
+  const recorded = (await client.query(
+    "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [projectKey, sessionId, null, run.id, null, "eval_run", startedAt, endedAt, 2_048, "COMPLETED"]
+  )).rows[0]
+  assert.deepEqual(recorded, { metering_ok: true, replayed: false, duration_ms: "90000" })
+  const replayed = (await client.query(
+    "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [projectKey, sessionId, null, run.id, null, "eval_run", startedAt, endedAt, 2_048, "COMPLETED"]
+  )).rows[0]
+  assert.deepEqual(replayed, { metering_ok: true, replayed: true, duration_ms: "90000" })
+  const registrationReplay = (await client.query(
+    "select * from public.register_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [projectKey, sessionId, null, run.id, null, "eval_run", registration.intentId, registration.token, registration.workerId, 360]
+  )).rows[0]
+  assert.equal(registrationReplay.metering_state, "resolved")
+  assert.equal(registrationReplay.replayed, true)
+
+  const workspaceUsage = (await client.query(
+    "select * from public.get_browser_provider_workspace_usage($1,$2)",
+    [ids.agencyId, projectKey]
+  )).rows[0]
+  assert.equal(Number(workspaceUsage.session_active_minutes), 1.5)
+  assert.equal(workspaceUsage.proxy_bytes, "2048")
+  assert.equal(workspaceUsage.session_count, "1")
+
+  const warning = await sampleBrowserProviderProjectUsage(client, projectKey, 85, 5_000)
+  assert.equal(warning.control_status, "warning")
+  assert.equal(warning.may_create_session, true)
+  const blocked = await sampleBrowserProviderProjectUsage(client, projectKey, 100, 5_000)
+  assert.equal(blocked.control_status, "blocked")
+  assert.equal(blocked.may_create_session, false)
+  const reset = await sampleBrowserProviderProjectUsage(client, projectKey, 5, 500)
+  assert.equal(reset.control_status, "metering_error")
+  assert.equal(reset.may_create_session, false)
+
+  const retryProjectKey = "d".repeat(64)
+  await sampleBrowserProviderProjectUsage(client, retryProjectKey, 10, 1_000)
+  const delayedSessionId = `bb-delayed-${randomUUID()}`
+  const delayedRegistration = await prepareAndRegisterBrowserProviderSession(client, {
+    projectKey: retryProjectKey,
+    sessionId: delayedSessionId,
+    evalRunId: run.id,
+  })
+  const pendingSample = await sampleBrowserProviderProjectUsage(client, retryProjectKey, 10, 1_000)
+  assert.equal(pendingSample.control_status, "provider_error")
+  assert.equal(pendingSample.control_reason, "session_usage_pending")
+  assert.equal(pendingSample.may_create_session, false)
+  assert.equal((await client.query(
+    "select * from public.claim_browser_provider_session_metering($1,$2,$3,$4)",
+    [retryProjectKey, `active-race-${randomUUID()}`, 4, 120]
+  )).rowCount, 0)
+  await client.query(
+    "select * from public.begin_browser_provider_session_terminal_metering($1,$2,$3,$4)",
+    [retryProjectKey, delayedSessionId, delayedRegistration.workerId, 30]
+  )
+  const immediateDeferred = (await client.query(
+    "select * from public.defer_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8)",
+    [retryProjectKey, delayedSessionId, delayedRegistration.workerId, 3, 60, 5, "not_terminal", new Date().toISOString()]
+  )).rows[0]
+  assert.equal(immediateDeferred.attempt_count, 1)
+  await client.query(
+    "update public.browser_provider_session_metering_queue set next_attempt_at=clock_timestamp() where provider_session_id=$1",
+    [delayedSessionId]
+  )
+  const retryWorker = `metering-retry-${randomUUID()}`
+  const claimedPending = (await client.query(
+    "select * from public.claim_browser_provider_session_metering($1,$2,$3,$4)",
+    [retryProjectKey, retryWorker, 4, 120]
+  )).rows
+  assert.equal(claimedPending.length, 1)
+  const deferred = (await client.query(
+    "select * from public.defer_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8)",
+    [retryProjectKey, delayedSessionId, retryWorker, 3, 60, 5, "not_terminal", new Date().toISOString()]
+  )).rows[0]
+  assert.equal(deferred.metering_state, "pending")
+  assert.equal(deferred.attempt_count, 2)
+  assert.equal(deferred.escalated, false)
+  const delayedStartedAt = new Date(Date.now() - 30_000).toISOString()
+  const delayedEndedAt = new Date(Date.parse(delayedStartedAt) + 20_000).toISOString()
+  const resolvedDelayed = (await client.query(
+    "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [retryProjectKey, delayedSessionId, null, run.id, null, "eval_run", delayedStartedAt, delayedEndedAt, 512, "COMPLETED"]
+  )).rows[0]
+  assert.deepEqual(resolvedDelayed, { metering_ok: true, replayed: false, duration_ms: "20000" })
+  const resolvedQueueReplay = (await client.query(
+    "select * from public.register_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [retryProjectKey, delayedSessionId, null, run.id, null, "eval_run", delayedRegistration.intentId, delayedRegistration.token, delayedRegistration.workerId, 360]
+  )).rows[0]
+  assert.equal(resolvedQueueReplay.metering_state, "resolved")
+  assert.equal(resolvedQueueReplay.replayed, true)
+  assert.equal(resolvedQueueReplay.duration_ms, "20000")
+
+  const escalationProjectKey = "e".repeat(64)
+  await sampleBrowserProviderProjectUsage(client, escalationProjectKey, 10, 1_000)
+  const escalationSessionId = `bb-escalation-${randomUUID()}`
+  const escalationRegistration = await prepareAndRegisterBrowserProviderSession(client, {
+    projectKey: escalationProjectKey,
+    sessionId: escalationSessionId,
+    evalRunId: run.id,
+  })
+  await client.query(
+    "select * from public.begin_browser_provider_session_terminal_metering($1,$2,$3,$4)",
+    [escalationProjectKey, escalationSessionId, escalationRegistration.workerId, 30]
+  )
+  let escalation
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    let worker = escalationRegistration.workerId
+    if (attempt > 1) {
+      await client.query(
+        "update public.browser_provider_session_metering_queue set next_attempt_at=clock_timestamp(),claim_expires_at=null,claimed_by=null where provider_session_id=$1",
+        [escalationSessionId]
+      )
+      worker = `metering-escalation-${attempt}-${randomUUID()}`
+      assert.equal((await client.query(
+        "select * from public.claim_browser_provider_session_metering($1,$2,$3,$4)",
+        [escalationProjectKey, worker, 4, 120]
+      )).rowCount, 1)
+    }
+    escalation = (await client.query(
+      "select * from public.defer_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8)",
+      [escalationProjectKey, escalationSessionId, worker, 3, 60, 5, "not_terminal", new Date().toISOString()]
+    )).rows[0]
+  }
+  assert.equal(escalation.metering_state, "permanent_error")
+  assert.equal(escalation.attempt_count, 3)
+  assert.equal(escalation.escalated, true)
+  const escalationControl = (await client.query(
+    "select status,reason,unresolved_metering_failures from public.browser_provider_cost_controls where project_key=$1",
+    [escalationProjectKey]
+  )).rows[0]
+  assert.deepEqual(escalationControl, {
+    status: "metering_error",
+    reason: "session_usage_unresolved",
+    unresolved_metering_failures: 1,
+  })
+
+  await assert.rejects(
+    client.query(
+      "select * from public.reopen_browser_provider_session_metering($1,$2,$3,$4,$5)",
+      [escalationProjectKey, escalationSessionId, 3, "Provider support confirmed terminal metadata is now available.", ids.otherUserId]
+    ),
+    /BROWSER_PROVIDER_SESSION_METERING_REOPEN_ACTOR_UNAUTHORIZED/
+  )
+  const reopenedSession = (await client.query(
+    "select * from public.reopen_browser_provider_session_metering($1,$2,$3,$4,$5)",
+    [escalationProjectKey, escalationSessionId, 3, "Provider support confirmed terminal metadata is now available.", ids.userId]
+  )).rows[0]
+  assert.deepEqual(reopenedSession, { reopened: true, replayed: false, metering_state: "pending" })
+  const reopenedSessionReplay = (await client.query(
+    "select * from public.reopen_browser_provider_session_metering($1,$2,$3,$4,$5)",
+    [escalationProjectKey, escalationSessionId, 3, "Provider support confirmed terminal metadata is now available.", ids.userId]
+  )).rows[0]
+  assert.deepEqual(reopenedSessionReplay, { reopened: false, replayed: true, metering_state: "pending" })
+  await client.query(
+    "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [escalationProjectKey, escalationSessionId, null, run.id, null, "eval_run", startedAt, endedAt, 256, "COMPLETED"]
+  )
+  assert.equal((await client.query(
+    "select count(*)::integer as count from public.audit_events where action='browser_provider_session_metering_reopened' and entity_id=$1",
+    [run.id]
+  )).rows[0].count, 1)
+
+  const creationProjectKey = "f".repeat(64)
+  await sampleBrowserProviderProjectUsage(client, creationProjectKey, 10, 1_000)
+  const creationToken = randomBytes(24).toString("base64url")
+  const creationIntentId = (await client.query(
+    "select creation_intent_id from public.prepare_browser_provider_session_creation($1,$2,$3,$4,$5,$6)",
+    [creationProjectKey, creationToken, null, run.id, null, "eval_run"]
+  )).rows[0].creation_intent_id
+  await client.query(
+    "select public.mark_browser_provider_session_creation_uncertain($1,$2,$3)",
+    [creationIntentId, creationProjectKey, "create_response_ambiguous"]
+  )
+  let creationEscalation
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await client.query(
+      "update public.browser_provider_session_creation_intents set next_reconcile_at=clock_timestamp(),claim_expires_at=null,claimed_by=null where id=$1",
+      [creationIntentId]
+    )
+    const worker = `creation-escalation-${attempt}-${randomUUID()}`
+    assert.equal((await client.query(
+      "select * from public.claim_browser_provider_session_creation_reconciliation($1,$2,$3,$4)",
+      [creationProjectKey, worker, 4, 120]
+    )).rowCount, 1)
+    creationEscalation = (await client.query(
+      "select * from public.defer_browser_provider_session_creation_reconciliation($1,$2,$3,$4,$5,$6,$7,$8)",
+      [creationIntentId, creationProjectKey, worker, 3, 60, 5, "provider_unavailable", new Date().toISOString()]
+    )).rows[0]
+  }
+  assert.deepEqual(creationEscalation, {
+    creation_state: "permanent_error",
+    attempt_count: 3,
+    resolved_absent: false,
+    permanent: true,
+  })
+  await assert.rejects(
+    client.query(
+      "select * from public.reopen_browser_provider_session_creation_reconciliation($1,$2,$3,$4,$5)",
+      [creationIntentId, creationProjectKey, 3, "A late metadata lookup now returns one exact provider session.", ids.otherUserId]
+    ),
+    /BROWSER_PROVIDER_SESSION_CREATION_REOPEN_ACTOR_UNAUTHORIZED/
+  )
+  const reopenedCreation = (await client.query(
+    "select * from public.reopen_browser_provider_session_creation_reconciliation($1,$2,$3,$4,$5)",
+    [creationIntentId, creationProjectKey, 3, "A late metadata lookup now returns one exact provider session.", ids.userId]
+  )).rows[0]
+  assert.deepEqual(reopenedCreation, { reopened: true, replayed: false, creation_state: "uncertain" })
+  const reopenedCreationReplay = (await client.query(
+    "select * from public.reopen_browser_provider_session_creation_reconciliation($1,$2,$3,$4,$5)",
+    [creationIntentId, creationProjectKey, 3, "A late metadata lookup now returns one exact provider session.", ids.userId]
+  )).rows[0]
+  assert.deepEqual(reopenedCreationReplay, { reopened: false, replayed: true, creation_state: "uncertain" })
+  const lateSessionId = `bb-late-create-${randomUUID()}`
+  const lateWorker = `late-create-metering-${randomUUID()}`
+  const lateRegistration = (await client.query(
+    "select * from public.register_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [creationProjectKey, lateSessionId, null, run.id, null, "eval_run", creationIntentId, creationToken, lateWorker, 360]
+  )).rows[0]
+  assert.equal(lateRegistration.metering_state, "active")
+  await client.query(
+    "select * from public.begin_browser_provider_session_terminal_metering($1,$2,$3,$4)",
+    [creationProjectKey, lateSessionId, lateWorker, 30]
+  )
+  await client.query(
+    "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [creationProjectKey, lateSessionId, null, run.id, null, "eval_run", startedAt, endedAt, 128, "COMPLETED"]
+  )
+  assert.equal((await client.query(
+    "select count(*)::integer as count from public.audit_events where action='browser_provider_session_creation_reopened' and entity_id=$1",
+    [run.id]
+  )).rows[0].count, 1)
+
+  const abandonedProjectKey = "a".repeat(64)
+  await sampleBrowserProviderProjectUsage(client, abandonedProjectKey, 10, 1_000)
+  const abandonedToken = randomBytes(24).toString("base64url")
+  const abandonedIntentId = (await client.query(
+    "select creation_intent_id from public.prepare_browser_provider_session_creation($1,$2,$3,$4,$5,$6)",
+    [abandonedProjectKey, abandonedToken, null, run.id, null, "eval_run"]
+  )).rows[0].creation_intent_id
+  await assert.rejects(
+    client.query(
+      "select creation_intent_id from public.prepare_browser_provider_session_creation($1,$2,$3,$4,$5,$6)",
+      [abandonedProjectKey, randomBytes(24).toString("base64url"), null, run.id, null, "eval_run"]
+    ),
+    /BROWSER_PROVIDER_SESSION_CREATION_CONTROL_BLOCKED/
+  )
+  assert.equal((await client.query(
+    "select * from public.claim_browser_provider_session_creation_reconciliation($1,$2,$3,$4)",
+    [abandonedProjectKey, `prepared-too-young-${randomUUID()}`, 4, 120]
+  )).rowCount, 0)
+  await client.query(
+    "update public.browser_provider_session_creation_intents set created_at=clock_timestamp()-interval '61 seconds' where id=$1",
+    [abandonedIntentId]
+  )
+  const abandonedWorker = `prepared-abandoned-${randomUUID()}`
+  const abandonedClaim = (await client.query(
+    "select * from public.claim_browser_provider_session_creation_reconciliation($1,$2,$3,$4)",
+    [abandonedProjectKey, abandonedWorker, 4, 120]
+  )).rows[0]
+  assert.equal(abandonedClaim.creation_intent_id, abandonedIntentId)
+  assert.deepEqual((await client.query(
+    "select state,last_error_code from public.browser_provider_session_creation_intents where id=$1",
+    [abandonedIntentId]
+  )).rows[0], { state: "uncertain", last_error_code: "prepared_worker_abandoned" })
+
+  await assert.rejects(
+    client.query(
+      "select * from public.record_browser_provider_session_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+      [projectKey, `bb-tenant-${randomUUID()}`, ids.otherAgencyId, null, ids.clientId, "page_scan", startedAt, endedAt, 1, "COMPLETED"]
+    ),
+    /BROWSER_PROVIDER_SESSION_TENANT_INVALID/
+  )
+
+  await client.query("set role authenticated")
+  try {
+    assert.equal((await client.query(
+      "select has_table_privilege('authenticated','public.browser_provider_session_usage','select') as allowed"
+    )).rows[0].allowed, false)
+    assert.equal((await client.query(
+      "select has_table_privilege('authenticated','public.browser_provider_session_metering_queue','select') as allowed"
+    )).rows[0].allowed, false)
+    assert.equal((await client.query(
+      "select has_table_privilege('authenticated','public.browser_provider_session_creation_intents','select') as allowed"
+    )).rows[0].allowed, false)
+    assert.equal((await client.query(
+      "select has_function_privilege('authenticated','public.record_browser_provider_session_usage(text,text,uuid,uuid,uuid,text,timestamptz,timestamptz,bigint,text)','execute') as allowed"
+    )).rows[0].allowed, false)
+  } finally {
+    await client.query("reset role")
+  }
+  return {
+    usageRecorded: true,
+    ceilingBlocked: true,
+    counterResetFailedClosed: true,
+    tenantBoundaryDenied: true,
+    delayedTerminalResolved: true,
+    meteringRetryEscalated: true,
+    samplingRaceSafe: true,
+    activeLeaseRaceSafe: true,
+    permanentRecoveryAudited: true,
+    recoveryActorBoundaryDenied: true,
+    creationCrashRecovered: true,
+  }
+}
+
+async function claimBrowserProviderProjectUsage(client, projectKey, workerId) {
+  return (await client.query(
+    "select * from public.claim_browser_provider_project_usage_sample($1,$2,$3,$4,$5,$6)",
+    [projectKey, workerId, 100, 100_000, 80, 45]
+  )).rows[0]
+}
+
+async function recordClaimedBrowserProviderProjectUsage(client, input) {
+  return (await client.query(
+    "select * from public.record_browser_provider_project_usage($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    [
+      input.projectKey,
+      input.browserMinutes,
+      input.proxyBytes,
+      100,
+      100_000,
+      80,
+      "session_preflight",
+      input.workerId,
+      new Date().toISOString(),
+    ]
+  )).rows[0]
+}
+
+async function sampleBrowserProviderProjectUsage(client, projectKey, browserMinutes, proxyBytes) {
+  const workerId = `usage-sample-${randomUUID()}`
+  assert.equal((await claimBrowserProviderProjectUsage(client, projectKey, workerId)).claimed, true)
+  return recordClaimedBrowserProviderProjectUsage(client, {
+    projectKey,
+    workerId,
+    browserMinutes,
+    proxyBytes,
+  })
+}
+
+async function prepareAndRegisterBrowserProviderSession(client, input) {
+  const token = randomBytes(24).toString("base64url")
+  const intentId = (await client.query(
+    "select creation_intent_id from public.prepare_browser_provider_session_creation($1,$2,$3,$4,$5,$6)",
+    [input.projectKey, token, null, input.evalRunId, null, "eval_run"]
+  )).rows[0].creation_intent_id
+  const workerId = `browser-session-active-${randomUUID()}`
+  const row = (await client.query(
+    "select * from public.register_browser_provider_session_metering($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    [input.projectKey, input.sessionId, null, input.evalRunId, null, "eval_run", intentId, token, workerId, 360]
+  )).rows[0]
+  return { row, intentId, token, workerId }
 }
 
 function databaseUrl(connectionString, nextDatabase) {
@@ -105,7 +589,9 @@ create schema if not exists auth;
 create table if not exists auth.users (
   id uuid primary key,
   email text not null default '',
-  raw_user_meta_data jsonb not null default '{}'::jsonb
+  raw_user_meta_data jsonb not null default '{}'::jsonb,
+  raw_app_meta_data jsonb not null default '{}'::jsonb,
+  invited_at timestamptz
 );
 create or replace function auth.uid() returns uuid language sql stable as $$
   select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
@@ -335,10 +821,10 @@ async function proveQueuedKillAndCaptchaSafety(client, ids) {
   await client.query(
     `insert into public.eval_runs(
       id,agency_id,client_id,workflow_id,journey_version_id,schedule_id,trigger_source,status,
-      idempotency_key,synthetic_marker,dispatch_state,dispatch_worker_id,dispatch_lease_expires_at
+      idempotency_key,synthetic_marker,dispatch_state,dispatch_worker_id,dispatch_lease_expires_at,requested_by_user_id
     ) values ($1,$2,$3,$4,$5,$6,'scheduled','queued',$7,'MF-EVAL-AAAAAAAAAAAAAAAAAAAA',
-      'dispatching',$8,now() + interval '5 minutes')`,
-    [cancelledRunId, ids.agencyId, ids.clientId, journeyId, versionId, scheduleId, `kill-${cancelledRunId}`, dispatchWorkerId]
+      'dispatching',$8,now() + interval '5 minutes',$9)`,
+    [cancelledRunId, ids.agencyId, ids.clientId, journeyId, versionId, scheduleId, `kill-${cancelledRunId}`, dispatchWorkerId, ids.userId]
   )
   await client.query(
     "select * from public.cancel_business_eval_run_before_execution($1,$2,$3,$4)",
@@ -362,10 +848,10 @@ async function proveQueuedKillAndCaptchaSafety(client, ids) {
   await client.query(
     `insert into public.eval_runs(
       id,agency_id,client_id,workflow_id,journey_version_id,schedule_id,trigger_source,status,
-      idempotency_key,synthetic_marker,dispatch_state,worker_id,claimed_at,started_at,lease_expires_at
+      idempotency_key,synthetic_marker,dispatch_state,worker_id,claimed_at,started_at,lease_expires_at,requested_by_user_id
     ) values ($1,$2,$3,$4,$5,$6,'manual','running',$7,'MF-EVAL-BBBBBBBBBBBBBBBBBBBB',
-      'dispatched',$8,now(),now(),now() + interval '5 minutes')`,
-    [captchaRunId, ids.agencyId, ids.clientId, journeyId, versionId, scheduleId, `captcha-${captchaRunId}`, runWorkerId]
+      'dispatched',$8,now(),now(),now() + interval '5 minutes',$9)`,
+    [captchaRunId, ids.agencyId, ids.clientId, journeyId, versionId, scheduleId, `captcha-${captchaRunId}`, runWorkerId, ids.userId]
   )
   const completedAt = new Date().toISOString()
   const stageResults = [
@@ -519,7 +1005,14 @@ async function proveBusinessEvalsLifecycle(client, ids) {
 
   const leadSchedule = await client.query(
     "select * from public.configure_journey_schedule($1,$2,$3,$4,$5,$6)",
-    [ids.agencyId, leadJourneyId, leadVersion.nextDraftRevision, 1440, true, null]
+    [
+      ids.agencyId,
+      leadJourneyId,
+      leadVersion.nextDraftRevision,
+      1440,
+      true,
+      new Date(Date.now() - 60_000).toISOString(),
+    ]
   )
   const trialSchedule = await client.query(
     "select * from public.configure_journey_schedule($1,$2,$3,$4,$5,$6)",
@@ -528,6 +1021,46 @@ async function proveBusinessEvalsLifecycle(client, ids) {
   assert.equal(leadSchedule.rows[0].enabled, true)
   assert.equal(trialSchedule.rows[0].enabled, true)
   assert.equal(trialSchedule.rows[0].cleanup_verified, true)
+
+  const scheduleWorkerId = `database-scheduler-${randomUUID()}`
+  const dueSchedules = await client.query(
+    "select * from public.claim_due_journey_schedules($1,$2,$3)",
+    [scheduleWorkerId, 25, 300]
+  )
+  const claimedLeadSchedule = dueSchedules.rows.find((row) => row.schedule_id === leadSchedule.rows[0].id)
+  assert.ok(claimedLeadSchedule, "The due lead journey schedule must be claimed before enqueue.")
+  const scheduledLead = await enqueueAndFinalizeAcceptanceRun(client, {
+    agencyId: ids.agencyId,
+    journeyId: claimedLeadSchedule.workflow_id,
+    versionId: claimedLeadSchedule.journey_version_id,
+    scheduleId: claimedLeadSchedule.schedule_id,
+    scheduledFor: claimedLeadSchedule.scheduled_for,
+    userId: null,
+    triggerSource: "scheduled",
+    expectedVerdict: "passed",
+  })
+  const persistedScheduledRun = (await client.query(
+    `select schedule_id,trigger_source,scheduled_for,requested_by_user_id,status,verdict
+     from public.eval_runs where id=$1 and agency_id=$2`,
+    [scheduledLead.runId, ids.agencyId]
+  )).rows[0]
+  assert.equal(persistedScheduledRun.schedule_id, claimedLeadSchedule.schedule_id)
+  assert.equal(persistedScheduledRun.trigger_source, "scheduled")
+  assert.equal(
+    persistedScheduledRun.scheduled_for.toISOString(),
+    claimedLeadSchedule.scheduled_for.toISOString(),
+  )
+  assert.equal(persistedScheduledRun.requested_by_user_id, null)
+  assert.equal(persistedScheduledRun.status, "finalized")
+  assert.equal(persistedScheduledRun.verdict, "passed")
+  const advancedLeadSchedule = (await client.query(
+    "select last_run_at,next_run_at,lease_expires_at,leased_by from public.journey_schedules where id=$1",
+    [claimedLeadSchedule.schedule_id]
+  )).rows[0]
+  assert.ok(advancedLeadSchedule.last_run_at)
+  assert.ok(advancedLeadSchedule.next_run_at > advancedLeadSchedule.last_run_at)
+  assert.equal(advancedLeadSchedule.lease_expires_at, null)
+  assert.equal(advancedLeadSchedule.leased_by, null)
 
   const failedLead = await enqueueAndFinalizeAcceptanceRun(client, {
     agencyId: ids.agencyId,
@@ -694,8 +1227,10 @@ async function proveBusinessEvalsLifecycle(client, ids) {
   })
 
   return {
+    projectId,
     launchTemplatesPublished: [leadVersion.versionId, trialVersion.versionId],
     supervisedSchedulesEnabled: [leadSchedule.rows[0].id, trialSchedule.rows[0].id],
+    scheduledRunFinalizedWithoutUser: scheduledLead.runId,
     incidentRecoveryVerified: failedLead.incidentId,
     cancellationReplaySafe: cancellationTarget.eval_run_id,
     reportSnapshotCreated: report.id,
@@ -703,6 +1238,241 @@ async function proveBusinessEvalsLifecycle(client, ids) {
     shareRevocationReplaySafe: true,
     hardRunQuotaEnforced: true,
     publishContractParity,
+  }
+}
+
+async function proveAiActorAttributionSurvivesMembershipRemoval(client, ids, projectId) {
+  const memberUserId = randomUUID()
+  const requestId = randomUUID()
+  const legalMetadata = {
+    maintainflow_legal_acceptance: {
+      accepted: true,
+      terms_version: "2026-07-19",
+      privacy_version: "2026-07-19",
+      source: "email_signup",
+    },
+  }
+  await client.query(
+    `insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data)
+     values ($1,$2,$3::jsonb,$4::jsonb)`,
+    [
+      memberUserId,
+      `ai-member-${memberUserId.slice(0, 8)}@maintainflow.test`,
+      JSON.stringify(legalMetadata),
+      JSON.stringify({ provider: "email" }),
+    ]
+  )
+  await client.query(
+    "select * from public.activate_email_signup_account($1)",
+    [memberUserId]
+  )
+  const membership = await client.query(
+    "select * from public.add_business_eval_workspace_member($1,$2,$3,$4,$5)",
+    [ids.agencyId, ids.userId, memberUserId, "member", 5]
+  )
+  assert.equal(membership.rowCount, 1)
+  assert.equal(membership.rows[0].user_id, memberUserId)
+
+  const idempotencyKeyHash = createHash("sha256")
+    .update(`ai-member-removal:${requestId}`)
+    .digest("hex")
+  const requestHash = createHash("sha256")
+    .update(JSON.stringify({ projectId, memberUserId, kind: "journey_draft" }))
+    .digest("hex")
+  const claimedRequest = await client.query(
+    "select * from public.claim_business_eval_ai_request($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+    [
+      requestId,
+      ids.agencyId,
+      projectId,
+      null,
+      null,
+      null,
+      memberUserId,
+      "journey_draft",
+      idempotencyKeyHash,
+      requestHash,
+      "gpt-5.6-sol",
+      "low",
+    ]
+  )
+  assert.equal(claimedRequest.rows[0].request_id, requestId)
+  assert.equal(claimedRequest.rows[0].request_status, "processing")
+  assert.equal(claimedRequest.rows[0].claimed, true)
+  const finishedRequest = await client.query(
+    "select * from public.finish_business_eval_ai_request($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8)",
+    [
+      ids.agencyId,
+      requestId,
+      memberUserId,
+      "completed",
+      JSON.stringify({ summary: "Safe deterministic draft advice recorded for acceptance." }),
+      `resp_acceptance_${requestId}`,
+      JSON.stringify({ inputTokens: 12, outputTokens: 8 }),
+      "",
+    ]
+  )
+  assert.equal(finishedRequest.rows[0].request_status, "completed")
+
+  const removal = await client.query(
+    "select * from public.remove_business_eval_workspace_member($1,$2,$3)",
+    [ids.agencyId, ids.userId, memberUserId]
+  )
+  assert.deepEqual(removal.rows[0], { removed: true })
+  assert.equal(Number((await client.query(
+    "select count(*) from public.memberships where agency_id=$1 and user_id=$2",
+    [ids.agencyId, memberUserId]
+  )).rows[0].count), 0)
+  assert.equal(Number((await client.query(
+    "select count(*) from public.profiles where id=$1",
+    [memberUserId]
+  )).rows[0].count), 1)
+
+  const retainedRequest = (await client.query(
+    "select actor_user_id,status from public.ai_assistance_requests where id=$1 and agency_id=$2",
+    [requestId, ids.agencyId]
+  )).rows[0]
+  assert.deepEqual(retainedRequest, { actor_user_id: memberUserId, status: "completed" })
+  const retainedAudit = (await client.query(
+    `select actor_user_id,metadata_json->>'status' as status
+     from public.audit_events
+     where agency_id=$1 and entity_id=$2 and action='ai_assistance_request_finalized'`,
+    [ids.agencyId, requestId]
+  )).rows[0]
+  assert.deepEqual(retainedAudit, { actor_user_id: memberUserId, status: "completed" })
+
+  await assert.rejects(
+    client.query(
+      "select * from public.claim_business_eval_ai_request($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+      [
+        requestId,
+        ids.agencyId,
+        projectId,
+        null,
+        null,
+        null,
+        memberUserId,
+        "journey_draft",
+        idempotencyKeyHash,
+        requestHash,
+        "gpt-5.6-sol",
+        "low",
+      ]
+    ),
+    /AI-assistance actor is not a workspace member/
+  )
+
+  return {
+    removedActorAttributionRetained: requestId,
+    removedActorAccessRevoked: memberUserId,
+  }
+}
+
+async function proveStripeCheckoutReservationConcurrency(client, connectionString, ids) {
+  const initialHash = createHash("sha256").update(`checkout-initial-${randomUUID()}`).digest("hex")
+  const initial = await client.query(
+    "select * from public.reserve_stripe_checkout_session($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+    [
+      ids.agencyId, ids.userId, "starter", "monthly", "https://www.maintainflow.io", "",
+      "owner@example.com", initialHash, 2100,
+    ]
+  )
+  assert.equal(initial.rowCount, 1)
+  assert.match(initial.rows[0].provider_idempotency_key, /^maintainflow-checkout-[a-f0-9]{64}$/)
+  assert.equal(
+    Math.round((initial.rows[0].expires_at.getTime() - initial.rows[0].provider_expires_at.getTime()) / 1000),
+    300
+  )
+
+  await client.query(
+    "select * from public.record_stripe_checkout_session($1,$2,$3,$4,$5)",
+    [
+      ids.agencyId,
+      initial.rows[0].id,
+      `cs_test_${randomUUID()}`,
+      "https://checkout.stripe.com/c/pay/cs_test_initial",
+      initial.rows[0].provider_expires_at,
+    ]
+  )
+  await client.query(
+    "select * from public.finish_stripe_checkout_session($1,$2,'expired')",
+    [ids.agencyId, (await client.query(
+      "select stripe_session_id from public.stripe_checkout_sessions where id=$1",
+      [initial.rows[0].id]
+    )).rows[0].stripe_session_id]
+  )
+
+  const contenders = [new Client({ connectionString }), new Client({ connectionString })]
+  await Promise.all(contenders.map((contender) => contender.connect()))
+  try {
+    const contenderInputs = [
+      { plan: "growth", interval: "monthly", hash: createHash("sha256").update(`checkout-b-${randomUUID()}`).digest("hex") },
+      { plan: "scale", interval: "annual", hash: createHash("sha256").update(`checkout-c-${randomUUID()}`).digest("hex") },
+    ]
+    const [b, c] = await Promise.all(contenders.map((contender, index) => contender.query(
+      "select * from public.reserve_stripe_checkout_session($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [
+        ids.agencyId, ids.userId, contenderInputs[index].plan, contenderInputs[index].interval,
+        "https://www.maintainflow.io", "", "owner@example.com", contenderInputs[index].hash, 2100,
+      ]
+    )))
+    assert.equal(b.rowCount, 1)
+    assert.equal(c.rowCount, 1)
+    assert.equal(b.rows[0].id, c.rows[0].id, "Concurrent cross-plan requests must converge on one reservation.")
+    assert.equal(b.rows[0].provider_idempotency_key, c.rows[0].provider_idempotency_key)
+    assert.ok(
+      (b.rows[0].plan_id === "growth" && b.rows[0].billing_interval === "monthly")
+      || (b.rows[0].plan_id === "scale" && b.rows[0].billing_interval === "annual")
+    )
+    assert.equal(Number((await client.query(
+      "select count(*) from public.stripe_checkout_sessions where agency_id=$1 and status in ('creating','open')",
+      [ids.agencyId]
+    )).rows[0].count), 1)
+
+    const replayHash = b.rows[0].plan_id === contenderInputs[0].plan
+      && b.rows[0].billing_interval === contenderInputs[0].interval
+      ? contenderInputs[0].hash
+      : contenderInputs[1].hash
+    const replay = await client.query(
+      "select * from public.reserve_stripe_checkout_session($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [
+        ids.agencyId, ids.userId, b.rows[0].plan_id, b.rows[0].billing_interval,
+        "https://www.maintainflow.io", "", "owner@example.com", replayHash, 2100,
+      ]
+    )
+    assert.equal(replay.rows[0].id, b.rows[0].id)
+    assert.equal(replay.rows[0].provider_idempotency_key, b.rows[0].provider_idempotency_key)
+  } finally {
+    await Promise.all(contenders.map((contender) => contender.end().catch(() => undefined)))
+  }
+
+  await assert.rejects(
+    client.query(
+      "select * from public.reserve_stripe_checkout_session($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [
+        ids.agencyId, ids.otherUserId, "starter", "monthly", "https://www.maintainflow.io", "",
+        "other@example.com", createHash("sha256").update(randomUUID()).digest("hex"), 2100,
+      ]
+    ),
+    /BILLING_ADMIN_REQUIRED/
+  )
+  const privileges = (await client.query(`
+    select
+      has_table_privilege('authenticated','public.stripe_checkout_sessions','select') as can_select,
+      has_table_privilege('authenticated','public.stripe_checkout_sessions','insert') as can_insert,
+      has_function_privilege(
+        'authenticated',
+        'public.reserve_stripe_checkout_session(uuid,uuid,text,text,text,text,text,text,integer)',
+        'execute'
+      ) as can_reserve
+  `)).rows[0]
+  assert.deepEqual(privileges, { can_select: false, can_insert: false, can_reserve: false })
+
+  return {
+    singleActiveReservation: true,
+    concurrentWinnerStable: true,
+    providerKeyStable: true,
+    tenantBoundaryDenied: true,
   }
 }
 
@@ -860,8 +1630,9 @@ async function enqueueAndFinalizeAcceptanceRun(client, input) {
   const enqueued = await client.query(
     "select * from public.enqueue_business_eval_run($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     [
-      input.agencyId, input.journeyId, input.versionId, null, input.triggerSource,
-      `${input.triggerSource}-${randomUUID()}`, null, acceptanceMarker(), 7500, input.userId,
+      input.agencyId, input.journeyId, input.versionId, input.scheduleId ?? null, input.triggerSource,
+      `${input.triggerSource}-${randomUUID()}`, input.scheduledFor ?? null, acceptanceMarker(), 7500,
+      input.userId ?? null,
       input.verificationIssueId ?? null,
     ]
   )
@@ -881,7 +1652,11 @@ async function enqueueAndFinalizeAcceptanceRun(client, input) {
     ? stages.findIndex((stage) => stage.stage_key === input.failedStageKey)
     : -1
   assert.equal(input.failedStageKey ? failedIndex >= 0 : true, true)
-  const completedAt = new Date().toISOString()
+  const completedAt = (await client.query(
+    `select greatest(clock_timestamp(), started_at + interval '1 millisecond') as completed_at
+     from public.eval_runs where id=$1`,
+    [runId]
+  )).rows[0].completed_at.toISOString()
   const stageResults = stages.map((stage, index) => {
     const verdict = stage.is_cleanup
       ? "passed"
@@ -966,6 +1741,202 @@ function acceptanceLeadDefinition(projectId) {
         { id: "wait_for_success", label: "Wait for success confirmation", timeoutMs: 10000, type: "wait_for_text", text: "Thank you" },
       ], "A success state is visible.", "The prospect knows the enquiry was received."),
     ],
+  }
+}
+
+async function proveLegalAcceptanceLifecycle(client, ids) {
+  const existingRows = await client.query(
+    "select count(*)::integer as count from public.legal_acceptances where user_id in ($1,$2)",
+    [ids.userId, ids.otherUserId]
+  )
+  assert.equal(existingRows.rows[0].count, 0, "Existing users must never be backfilled as accepted.")
+
+  const emailUserId = randomUUID()
+  const emailMetadata = {
+    maintainflow_legal_acceptance: {
+      accepted: true,
+      terms_version: "2026-07-19",
+      privacy_version: "2026-07-19",
+      source: "email_signup",
+    },
+  }
+  await client.query(
+    `insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data)
+     values ($1,$2,$3::jsonb,$4::jsonb)`,
+    [emailUserId, "accepted@maintainflow.test", JSON.stringify(emailMetadata), JSON.stringify({ provider: "email" })]
+  )
+  const emailAcceptance = (await client.query(
+    "select terms_version,privacy_version,source from public.legal_acceptances where user_id=$1",
+    [emailUserId]
+  )).rows[0]
+  assert.deepEqual(emailAcceptance, {
+    terms_version: "2026-07-19",
+    privacy_version: "2026-07-19",
+    source: "email_signup",
+  })
+  assert.deepEqual((await client.query(
+    "select activation_kind,activated_at is null as pending from public.auth_account_activations where user_id=$1",
+    [emailUserId]
+  )).rows[0], {
+    activation_kind: "email_signup",
+    pending: true,
+  })
+  await client.query("set role authenticated")
+  try {
+    await client.query("select set_config('request.jwt.claim.sub',$1,false)", [emailUserId])
+    assert.deepEqual((await client.query(
+      "select * from public.current_auth_account_activation_status()"
+    )).rows[0], {
+      activation_required: true,
+      activation_complete: false,
+    })
+  } finally {
+    await client.query("reset role")
+  }
+
+  const emailAgencyId = randomUUID()
+  await client.query(
+    "insert into public.agencies(id,name,slug) values ($1,$2,$3)",
+    [emailAgencyId, "Pending email activation", `email-activation-${emailAgencyId.slice(0, 8)}`]
+  )
+  await assert.rejects(
+    client.query(
+      "insert into public.memberships(agency_id,user_id,role) values ($1,$2,'owner')",
+      [emailAgencyId, emailUserId]
+    ),
+    /EMAIL_CONFIRMATION_REQUIRED/
+  )
+  const activatedEmail = (await client.query(
+    "select * from public.activate_email_signup_account($1)",
+    [emailUserId]
+  )).rows[0]
+  assert.equal(activatedEmail.activation_required, true)
+  assert.ok(activatedEmail.activated_at)
+  await client.query("set role authenticated")
+  try {
+    await client.query("select set_config('request.jwt.claim.sub',$1,false)", [emailUserId])
+    assert.deepEqual((await client.query(
+      "select * from public.current_auth_account_activation_status()"
+    )).rows[0], {
+      activation_required: true,
+      activation_complete: true,
+    })
+  } finally {
+    await client.query("reset role")
+  }
+  await client.query(
+    "insert into public.memberships(agency_id,user_id,role) values ($1,$2,'owner')",
+    [emailAgencyId, emailUserId]
+  )
+
+  const bypassUserId = randomUUID()
+  await assert.rejects(
+    client.query(
+      `insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data)
+       values ($1,$2,'{}'::jsonb,$3::jsonb)`,
+      [bypassUserId, "bypass@maintainflow.test", JSON.stringify({ provider: "email" })]
+    ),
+    /LEGAL_ACCEPTANCE_REQUIRED/
+  )
+  assert.equal((await client.query("select count(*)::integer as count from auth.users where id=$1", [bypassUserId])).rows[0].count, 0)
+
+  const invitedUserId = randomUUID()
+  const invitedAgencyId = randomUUID()
+  await client.query(
+    `insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data,invited_at)
+     values ($1,$2,'{}'::jsonb,$3::jsonb,clock_timestamp())`,
+    [invitedUserId, "invited@maintainflow.test", JSON.stringify({ provider: "email" })]
+  )
+  assert.equal((await client.query(
+    "select count(*)::integer as count from public.legal_acceptances where user_id=$1",
+    [invitedUserId]
+  )).rows[0].count, 0, "A pending invitation must not be misrepresented as accepted.")
+  await client.query(
+    "insert into public.agencies(id,name,slug) values ($1,$2,$3)",
+    [invitedAgencyId, "Pending invite legal acceptance", `invite-legal-${invitedAgencyId.slice(0, 8)}`]
+  )
+  await client.query(
+    "insert into public.memberships(agency_id,user_id,role) values ($1,$2,'member')",
+    [invitedAgencyId, invitedUserId]
+  )
+  await client.query(
+    "select * from public.record_current_legal_acceptance($1,$2,$3,$4,$5)",
+    [invitedUserId, "2026-07-19", "2026-07-19", "password_reset", "d".repeat(64)]
+  )
+  assert.deepEqual((await client.query(
+    "select terms_version,privacy_version,source from public.legal_acceptances where user_id=$1",
+    [invitedUserId]
+  )).rows[0], {
+    terms_version: "2026-07-19",
+    privacy_version: "2026-07-19",
+    source: "password_reset",
+  })
+
+  const oauthUserId = randomUUID()
+  const oauthAgencyId = randomUUID()
+  await client.query(
+    `insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data)
+     values ($1,$2,'{}'::jsonb,$3::jsonb)`,
+    [oauthUserId, "oauth@maintainflow.test", JSON.stringify({ provider: "google" })]
+  )
+  await client.query(
+    "insert into public.agencies(id,name,slug) values ($1,$2,$3)",
+    [oauthAgencyId, "OAuth legal acceptance", `oauth-legal-${oauthAgencyId.slice(0, 8)}`]
+  )
+  await assert.rejects(
+    client.query(
+      "insert into public.memberships(agency_id,user_id,role) values ($1,$2,'owner')",
+      [oauthAgencyId, oauthUserId]
+    ),
+    /CURRENT_LEGAL_ACCEPTANCE_REQUIRED/
+  )
+
+  const first = await client.query(
+    "select * from public.record_current_legal_acceptance($1,$2,$3,$4,$5)",
+    [oauthUserId, "2026-07-19", "2026-07-19", "oauth_callback", "a".repeat(64)]
+  )
+  const replay = await client.query(
+    "select * from public.record_current_legal_acceptance($1,$2,$3,$4,$5)",
+    [oauthUserId, "2026-07-19", "2026-07-19", "oauth_callback", "b".repeat(64)]
+  )
+  assert.equal(first.rowCount, 1)
+  assert.equal(replay.rows[0].acceptance_id, first.rows[0].acceptance_id)
+  assert.equal((await client.query(
+    "select count(*)::integer as count from public.legal_acceptances where user_id=$1",
+    [oauthUserId]
+  )).rows[0].count, 1)
+
+  await client.query(
+    "insert into public.memberships(agency_id,user_id,role) values ($1,$2,'owner')",
+    [oauthAgencyId, oauthUserId]
+  )
+
+  await client.query("set role authenticated")
+  try {
+    await client.query("select set_config('request.jwt.claim.sub',$1,false)", [oauthUserId])
+    await assert.rejects(
+      client.query(
+        `insert into public.legal_acceptances(
+          user_id,terms_version,privacy_version,source,idempotency_key_hash
+        ) values ($1,'2026-07-19','2026-07-19','oauth_callback',$2)`,
+        [oauthUserId, "c".repeat(64)]
+      ),
+      /permission denied|row-level security/
+    )
+  } finally {
+    await client.query("reset role")
+  }
+
+  return {
+    existingUsersNotBackfilled: true,
+    emailSignupAcceptanceRecorded: true,
+    emailSignupRequiresActivation: true,
+    confirmedEmailSignupCanJoinWorkspace: true,
+    directSignupWithoutAcceptanceRejected: true,
+    pendingInvitePreservedWithoutFalseAcceptance: true,
+    inviteActivationAcceptanceRecorded: true,
+    oauthAcceptanceIdempotent: true,
+    unacceptedMembershipDenied: true,
   }
 }
 

@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 
-import { businessEvalsErrorResponse, requireBusinessEvalsAuth } from "@/lib/api/business-evals-auth.server"
+import { BusinessEvalsApiError, businessEvalsErrorResponse, requireBusinessEvalsAuth } from "@/lib/api/business-evals-auth.server"
 import { journeyScanSchema, parseRequestJson } from "@/lib/api/business-evals-contracts"
 import { enforceBusinessEvalRateLimits } from "@/lib/api/business-evals-rate-limit.server"
 import { assertProjectAuthorizedForUrl } from "@/lib/api/projects.server"
 import { scanJourneyPage } from "@/lib/runner/page-scan.server"
+import { BrowserbaseUsageGuardError } from "@/lib/runner/browserbase-usage-control.server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -22,7 +23,12 @@ export async function POST(request: NextRequest) {
       destinationDomain: domain,
     })
     const authorization = await assertProjectAuthorizedForUrl(auth.workspace.id, input.projectId, input.url)
-    const scan = await scanJourneyPage(input.url)
+    const scan = await scanJourneyPage({
+      url: input.url,
+      agencyId: auth.workspace.id,
+      projectId: input.projectId,
+      allowedHosts: authorization.allowedHosts,
+    })
     return NextResponse.json({
       ok: true,
       data: {
@@ -33,6 +39,13 @@ export async function POST(request: NextRequest) {
       },
     })
   } catch (error) {
+    if (error instanceof BrowserbaseUsageGuardError) {
+      return businessEvalsErrorResponse(new BusinessEvalsApiError(
+        503,
+        "BROWSER_CAPACITY_PAUSED",
+        error.message
+      ))
+    }
     return businessEvalsErrorResponse(error)
   }
 }

@@ -14,18 +14,19 @@ This is deliberately a fail-closed decision. No environment, provider, or live d
 
 | Control | What it does | Why it is insufficient alone |
 | --- | --- | --- |
-| Maintain Flow `allowedHosts` and request guard | Re-resolves HTTPS requests while Playwright is connected; requires project authorization for top-level navigations and side-effecting requests; rejects address changes seen during a run | It is an application/controller control. The Browserbase browser can remain alive after the CDP client disconnects, so the handler is not an independent connection-time boundary during the email wait. |
+| Maintain Flow `allowedHosts` and request guard | Re-resolves HTTPS requests while Playwright is connected; requires project authorization for top-level navigations and side-effecting requests; rejects address changes seen during a run | It is an application/controller control and cannot independently enforce the provider's connection-time DNS decision during an active session. |
 | Browserbase `allowedDomains` | Restricts main-frame navigation to listed domains and subdomains | Browserbase's official SDK contract says it does not block iframe/subframe navigations or in-page requests such as images, scripts, and XHR. It therefore cannot protect subresource or worker egress. |
 | Playwright `browserContext.route()` | Intercepts matching HTTP requests in a connected context | Playwright documents Service Worker caveats and recommends `serviceWorkers: "block"` for interception. The current Browserbase adapter receives the provider-created default context rather than creating one with that option. Updated Service Worker main-script requests also have a documented routing limitation. |
-| Playwright `routeWebSocket()` | Rejects WebSockets created after the handler is installed | The handler is controller-bound. It is not a provider-side rule that remains authoritative while a `keepAlive` session is disconnected. |
+| Playwright `routeWebSocket()` | Rejects WebSockets created after the handler is installed | The handler is controller-bound and does not make an ordinary CONNECT tunnel capable of distinguishing encrypted HTTPS from WSS during an active session. |
 | Browserbase managed proxies | Provide managed network identity and geolocation | Browserbase does not document them as a private/reserved-address, DNS-rebinding, or unsupported-protocol security boundary. Its documentation points to custom HTTP/HTTPS proxies for custom security policy and routing control. |
 
-The key lifecycle fact is that Browserbase documents `keepAlive` sessions as remaining available across disconnects until explicitly released or timed out. Maintain Flow disconnects between the submission and inbound-email phases. A page, worker, or browser-native connection can therefore outlive the Playwright handlers. `offline` emulation, page monkey-patching, and a best-effort domain list are not substitutes for a persistent network policy.
+Maintain Flow does not use that long-session lifecycle. One encrypted Browserbase Context is scoped to one eval run, and every phase opens a new session with `keepAlive: false` and `context.persist: true`. The session is ended before the workflow waits for inbound email; after Browserbase's bounded Context synchronization delay, the next phase opens a fresh sequential session. A private durable lease prevents concurrent Context use and a bounded janitor deletes abandoned Contexts. Contexts can persist cookies, local storage, IndexedDB, Service Workers, cache, and preferences, so every new active session still requires the same network boundary. `offline` emulation, page monkey-patching, and a best-effort domain list are not substitutes for that policy.
 
 Official references:
 
 - [Browserbase custom proxies and trusted CA certificates](https://docs.browserbase.com/platform/identity/proxies)
 - [Browserbase keep-alive lifecycle](https://docs.browserbase.com/platform/browser/long-sessions/keep-alive)
+- [Browserbase Context lifecycle](https://docs.browserbase.com/platform/browser/core-features/contexts)
 - [Browserbase SDK 2.16.0 `allowedDomains` contract](https://github.com/browserbase/sdk-node/blob/v2.16.0/src/resources/sessions/sessions.ts)
 - [Playwright context routing and Service Worker caveat](https://playwright.dev/docs/api/class-browsercontext#browser-context-route)
 - [Playwright WebSocket routing lifecycle](https://playwright.dev/docs/api/class-browsercontext#browser-context-route-web-socket)
@@ -38,7 +39,8 @@ The gateway is a security component, not a generic scraping proxy. Its reviewed 
 ### Listener and authentication
 
 - Expose one public HTTPS proxy origin on port 443. Plain HTTP, SOCKS, transparent proxying, admin ports, and unauthenticated listeners are forbidden.
-- Require a dedicated high-entropy username/password pair over TLS. Strip `Proxy-Authorization` before forwarding. Rotate credentials without reusing application or provider secrets.
+- Require a fresh Ed25519-signed Basic credential over TLS for every Browserbase session. The username is `mf1.<key ID>` and the password is the bounded signed token. Verify the trusted key ID, signature, audience, `nbf`/`iat`/`exp` (maximum 15 minutes), stable subject, random `jti`, and canonical side-effect-host claim before policy evaluation; strip `Proxy-Authorization` before forwarding. Static shared passwords are forbidden.
+- Eval credentials use `run:<run UUID>` and include exactly the canonical owner-approved hosts where mutation-class requests may occur. A read-only scan credential uses `scan:<canonical target host>` with an empty side-effect-host list. Read-only requests still receive ordinary destination/SSRF enforcement; a mutation-class request to a host absent from the signed claim is rejected.
 - Accept only standard HTTP proxy requests and `CONNECT` to destination port 443. Reject IP-literal authorities, user-info, malformed or non-normalized hosts, non-HTTPS destinations, arbitrary TCP, CONNECT-UDP, HTTP/3, and every unapproved protocol upgrade.
 - Limit source access to Browserbase egress ranges if Browserbase supplies stable current ranges. Authentication and policy enforcement remain mandatory even when an IP allowlist is present.
 
@@ -59,14 +61,14 @@ Envoy's dynamic forward proxy is a suitable DNS/connection policy building block
 
 ### HTTPS and WebSocket policy
 
-A normal CONNECT proxy can see `hostname:443`, but it cannot distinguish encrypted HTTPS from `wss://` after the tunnel is established. Because the browser stays alive across a controller disconnect, the gateway must use one of these reviewed mechanisms:
+A normal CONNECT proxy can see `hostname:443`, but it cannot distinguish encrypted HTTPS from `wss://` after the tunnel is established. During every active short-lived session, the gateway must use one of these reviewed mechanisms:
 
 1. **Preferred:** terminate/intercept target TLS with a dedicated private CA, inspect HTTP/1.1 and HTTP/2, and reject WebSocket Upgrade, extended CONNECT, WebTransport, and unknown protocol tunnels before upstream connection; or
-2. a Browserbase-provided, documented provider/network control that independently rejects those protocols for the full keep-alive lifetime and is proven by the same disconnected-session canaries.
+2. a Browserbase-provided, documented provider/network control that independently rejects those protocols for the full active-session lifetime and is proven by the same Context-handoff canaries.
 
 Browserbase officially supports uploading a private proxy CA and installing it in a session with `proxySettings.caCertificates`. Use that mechanism; keep `ignoreCertificateErrors: false`. The CA private key exists only in the gateway secret store, never in Maintain Flow, Browserbase, Vercel, workflow state, or logs. The Browserbase certificate record contains only the public CA certificate.
 
-The current runner does not yet pass `proxySettings.caCertificates`, so a TLS-intercepting gateway cannot be marked connected merely because the proxy origin and credentials exist. Add the certificate ID to the provider adapter and deployment validation only after the gateway is provisioned and its CA lifecycle is approved.
+The application adapter requires `BROWSERBASE_EGRESS_PROXY_SERVER`, `BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID`, `BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64`, `BROWSERBASE_EGRESS_PROXY_AUDIENCE`, and one `BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID`. It mints credentials only at session creation and supplies the certificate ID as the sole `proxySettings.caCertificates` entry for every Browserbase eval and page-scan session. Missing or structurally unsafe values fail before session creation, and Browserbase rejects an unknown or wrong-project ID when the session is created. Neither tokens nor the signing private key enter errors, logs, workflow handles, evidence, or Browserbase metadata. This wiring is not evidence that a gateway or CA has been provisioned: the runner remains blocked until the reviewed public CA is uploaded to the intended Browserbase project, its fingerprint and lifecycle are approved, and the live canaries pass.
 
 ### Resource and privacy limits
 
@@ -83,9 +85,9 @@ Keep the gateway implementation in the approved V2 repository under a future iso
 
 1. Build a pinned, minimal gateway image that combines an HTTP(S) TLS-interception layer with a policy dialer. The interception layer authenticates Browserbase, strips sensitive headers, rejects WebSocket/extended CONNECT and enforces body/header limits. The dialer owns all-answer DNS validation, per-connection IP pinning and upstream TLS. Envoy may supply that egress layer only with the custom all-answer resolver/validator described above; its stock address filter remains a backstop. Neither layer may have a direct bypass around the other.
 2. Deploy it as a dedicated Fly app in the region nearest Browserbase `eu-central-1`, with two always-on Machines, no autostop, a public TLS service on 443 only, rolling updates, TCP/HTTP health checks, bounded memory/CPU, and automatic routing away from unhealthy Machines. Fly documents raw TCP/TLS services, health checks, multiple-Machine availability, and encrypted runtime secrets.
-3. Put proxy credentials and the CA private key only in the gateway's encrypted secret store. Issue a dedicated public hostname and certificate. Keep the Envoy/admin listener on loopback or a private Unix socket and deny it at the Fly service definition.
+3. Put the proxy verification public keys and CA private key only in the gateway's encrypted secret store. Put the matching proxy-signing private key only in Vercel's production secret store. Issue a dedicated public hostname and certificate. Keep the Envoy/admin listener on loopback or a private Unix socket and deny it at the Fly service definition.
 4. Upload the public CA certificate to the Browserbase project. After review, configure its certificate ID through `proxySettings.caCertificates` and the existing catch-all external proxy rule. Do not disable normal certificate validation.
-5. Configure the existing three proxy variables in Vercel only after the deployed gateway passes the tests below. This audit intentionally does not perform that configuration.
+5. Configure `BROWSERBASE_EGRESS_PROXY_SERVER`, `BROWSERBASE_EGRESS_PROXY_SIGNING_KEY_ID`, `BROWSERBASE_EGRESS_PROXY_SIGNING_PRIVATE_KEY_BASE64`, `BROWSERBASE_EGRESS_PROXY_AUDIENCE`, and `BROWSERBASE_EGRESS_PROXY_CA_CERTIFICATE_ID` in Vercel only after the deployed gateway passes the tests below. The certificate ID is an opaque public Browserbase record ID; never configure PEM content or the CA private key in Vercel.
 6. Record the gateway image digest, policy fingerprint, CA certificate fingerprint, Browserbase project, app commit, Fly release, and canary evidence in the release packet.
 
 Fly references:
@@ -106,8 +108,9 @@ Run the following against the exact production image, policy, Browserbase projec
 - private, loopback, link-local, metadata, reserved, multicast, IPv4-mapped IPv6, NAT64/special, IP-literal, mixed public/private DNS, and public-to-private rebinding targets;
 - top-level navigation, iframe, popup, form POST, fetch/XHR, image/script, worker, and Service Worker update requests aimed at a blocked destination;
 - `ws://`, `wss://`, HTTP/1.1 Upgrade, HTTP/2 extended CONNECT, WebTransport/HTTP3, raw CONNECT to non-443, CONNECT-UDP, and a WebRTC/STUN/TURN leak probe;
-- repeat the WebSocket, worker, timer-driven fetch, and rebinding probes **after Playwright disconnects while the Browserbase keep-alive session remains active**;
-- invalid/expired upstream certificate, hostname mismatch, proxy certificate not trusted, oversized headers/body, slow DNS/connect/response, concurrency exhaustion, credential failure, and total gateway outage;
+- end the first `keepAlive: false` session, prove no live browser remains during a simulated email wait, wait for bounded Context synchronization, then repeat the WebSocket, worker, timer-driven fetch, and rebinding probes in a new session using the same Context;
+- invalid proxy signature, unknown key ID, wrong audience, not-yet-valid/expired token, overlong credential, an eval side effect outside its signed exact host set, any side effect under a read-only scan credential, invalid/expired upstream certificate, hostname mismatch, proxy certificate not trusted, oversized headers/body, slow DNS/connect/response, concurrency exhaustion, and total gateway outage;
+- prove the Browserbase SDK, its session API, and the gateway accept the maximum real signed-token credential length before clearing the live-provider blocker;
 - verify no direct/provider-managed fallback by making the external gateway unavailable and proving the browser cannot reach an allowed public canary;
 - verify audit output contains only the approved metadata fields and that provider/application logs contain no proxy credentials, CA key, Browserbase connection URL, raw target URL, body, cookie, or synthetic value.
 
@@ -115,4 +118,4 @@ Do not mark Browserbase production-ready until all canaries pass on seven consec
 
 ## Follow-on implementation boundary
 
-This audit adds no proxy service and no secret/configuration mutation. The next authorized implementation should be a separately reviewed security-infrastructure slice that delivers the gateway image, policy tests, Browserbase CA-ID wiring, readiness validation, disconnected-session canaries, operating runbook, and key/CA rotation procedure. It must not loosen the existing application-side checks; the two layers are intentionally independent.
+The app-side CA-ID/Context wiring and structural readiness validation do not add a proxy service, upload a certificate, or mutate any live environment. The separately reviewed security-infrastructure slice must still deliver the gateway image, policy tests, public CA upload and lifecycle, Context-handoff/no-live-session canaries, operating runbook, and key/CA rotation procedure. It must not loosen the existing application-side checks; the two layers are intentionally independent.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
 
-import { ordinaryClickLooksDestructive } from "../src/lib/runner/action-safety.ts"
+import { inProductCleanupLooksLikeAccountDeletion, ordinaryClickLooksDestructive } from "../src/lib/runner/action-safety.ts"
 import { classifyEmailTiming } from "../src/lib/runner/email-timing.ts"
 
 const baseline = "2026-07-18T12:00:00.000Z"
@@ -82,6 +82,44 @@ test("ordinary browser clicks reject destructive and payment-like actions", () =
   assert.equal(ordinaryClickLooksDestructive(click("Purchase", "Buy now")), true)
 })
 
+test("in-product cleanup requires an explicit account-deletion button", () => {
+  const cleanup = (label: string, role: string, name: string) => ({
+    id: "cleanup",
+    label,
+    timeoutMs: 1_000,
+    type: "cleanup" as const,
+    mode: "in_product" as const,
+    locator: { kind: "role" as const, role, name },
+  })
+  assert.equal(inProductCleanupLooksLikeAccountDeletion(cleanup("Delete synthetic test account", "button", "Delete test account")), true)
+  assert.equal(inProductCleanupLooksLikeAccountDeletion(cleanup("Continue", "button", "Continue")), false)
+  assert.equal(inProductCleanupLooksLikeAccountDeletion(cleanup("Delete account", "link", "Delete account")), false)
+  assert.equal(inProductCleanupLooksLikeAccountDeletion(cleanup("Delete account", "button", "Confirm payment")), false)
+})
+
+test("runner proves assertion uniqueness before waiting for visibility and rechecks after", () => {
+  const runner = readFileSync("src/lib/runner/playwright-engine.server.ts", "utf8")
+  const start = runner.indexOf("async function waitForUniqueVisibleAssertion")
+  const end = runner.indexOf("async function failDeterministicAssertionTimeout", start)
+  const body = runner.slice(start, end)
+  const attached = body.indexOf('state: "attached"')
+  const count = body.indexOf("const count = await locator.count()", attached)
+  const visible = body.indexOf('state: "visible"', count)
+  const visibleCount = body.indexOf("const visibleCount = await locator.count()", visible)
+  assert.ok(attached >= 0 && attached < count)
+  assert.ok(count < visible && visible < visibleCount)
+})
+
+test("page scans revalidate the final URL and block all mutation-class requests", () => {
+  const scan = readFileSync("src/lib/runner/page-scan.server.ts", "utf8")
+  const safety = readFileSync("src/lib/runner/browser-safety.server.ts", "utf8")
+  assert.match(scan, /installTopLevelNavigationGuard\(connection\.page, allowedDomains, connection\.networkMode, \{ blockSideEffects: true \}\)/)
+  assert.match(scan, /await assertNavigationStayedPublic\(connection\.page, allowedDomains\)/)
+  assert.match(scan, /url: \(await assertNavigationStayedPublic\(connection\.page, allowedDomains\)\)\.url\.toString\(\)/)
+  assert.match(safety, /guards\.blockSideEffects && isSideEffectingRequest\(request\)/)
+  assert.match(safety, /SIDE_EFFECT_BLOCKED/)
+})
+
 test("failure diagnostics are private summaries without request secrets", () => {
   const engine = readFileSync("src/lib/runner/playwright-engine.server.ts", "utf8")
   assert.match(engine, /safeJsonArtifact\("dom_summary"/)
@@ -100,17 +138,24 @@ test("failure diagnostics are private summaries without request secrets", () => 
 test("durable browser session handles never serialize connection URLs or browser state", () => {
   const types = readFileSync("src/lib/runner/types.ts", "utf8")
   const handle = types.match(/export type BrowserSessionHandle = \{([\s\S]*?)\n\}/)?.[1] ?? ""
-  assert.doesNotMatch(handle, /connectUrl|cookie|storageState|token/i)
+  assert.match(handle, /contextId: string/)
+  assert.match(handle, /lastSessionId: string \| null/)
+  assert.match(handle, /resumeUrl: string \| null/)
+  assert.match(handle, /readyAt: string/)
+  assert.doesNotMatch(handle, /connectUrl|cookie|storageState|token|allowedHosts|expiresAt/i)
 
   const browserbase = readFileSync("src/lib/runner/browserbase-provider.server.ts", "utf8")
-  assert.match(browserbase, /sessions\.retrieve\(session\.sessionId\)/)
-  assert.match(browserbase, /chromium\.connectOverCDP\(connectUrl\)/)
+  assert.match(browserbase, /contexts\.create\(\{ projectId: this\.projectId \}\)/)
+  assert.match(browserbase, /keepAlive: false/)
+  assert.match(browserbase, /context: \{ id: session\.contextId, persist: true \}/)
+  assert.match(browserbase, /chromium\.connectOverCDP\(created\.connectUrl\)/)
 
   const local = readFileSync("src/lib/runner/local-playwright-provider.server.ts", "utf8")
-  assert.match(local, /new Map<string, LocalSessionState>/)
-  assert.match(local, /storageState: await context\.storageState\(\)/)
-  assert.match(local, /storageState: saved\.storageState/)
-  assert.match(local, /return `\$\{url\.origin\}\$\{url\.pathname\}`/)
+  assert.match(local, /new Map<string, LocalContextState>/)
+  assert.match(local, /state\.storageState = await context\.storageState\(\)/)
+  assert.match(local, /state\.storageState \? \{ storageState: state\.storageState \}/)
+  assert.match(local, /lastSessionId = `local-session-\$\{crypto\.randomUUID\(\)\}`/)
+  assert.match(local, /sanitizeBrowserResumeUrl\(page\.url\(\), input\.allowedHosts\)/)
 })
 
 test("unique workflow attempts own preflight finalization and submission timing is persisted", () => {

@@ -2,13 +2,11 @@ import { calculateCheckStatus, evaluateAssertions } from "../assertions.ts"
 import { syntheticDemoEndpointAllowed, validateEndpointUrlForRequest } from "../endpoint-safety.server.ts"
 import { safeResponseSummary } from "../security.ts"
 import { pinnedEndpointFetch } from "../pinned-http.server.ts"
-import type { EndpointTestInput, EndpointTestResult, WorkflowMethod } from "../types.ts"
+import type { EndpointTestInput, EndpointTestResult } from "../types.ts"
 import { normalizeEndpointResult } from "./endpoint-result.ts"
 import type { CheckPlugin, CheckPluginRunOptions } from "./types.ts"
 
 const maxResponseBytes = 128_000
-const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"])
-
 export const endpointPlugin: CheckPlugin<EndpointTestInput, EndpointTestResult> = {
   pluginId: "endpoint",
   displayName: "Endpoint health check",
@@ -19,16 +17,22 @@ export const endpointPlugin: CheckPlugin<EndpointTestInput, EndpointTestResult> 
   validateConfig(input: unknown) {
     const value = input as Partial<EndpointTestInput>
     const method = String(value.method ?? "GET").toUpperCase()
-    if (!allowedMethods.has(method)) {
-      throw new Error("Unsupported HTTP method.")
+    if (method !== "GET") {
+      throw new Error("Endpoint checks support public GET requests only.")
+    }
+    if (String(value.body ?? "").trim()) {
+      throw new Error("Endpoint checks do not accept request bodies.")
+    }
+    if (Object.keys(normalizeHeaders(value.headers)).length > 0) {
+      throw new Error("Endpoint checks do not accept custom headers.")
     }
 
     return {
       rateLimitKey: String(value.rateLimitKey ?? ""),
       url: String(value.url ?? ""),
-      method: method as WorkflowMethod,
-      headers: normalizeHeaders(value.headers),
-      body: String(value.body ?? ""),
+      method: "GET",
+      headers: {},
+      body: "",
       expectedStatus: numberInRange(value.expectedStatus, 100, 599, 200),
       timeoutSeconds: numberInRange(value.timeoutSeconds, 1, 30, 10),
       maxLatencyMs: numberInRange(value.maxLatencyMs, 100, 60_000, 5_000),
@@ -68,9 +72,8 @@ async function runEndpointPluginCheck(input: EndpointTestInput, options: CheckPl
 
   try {
     const requestInit: RequestInit = {
-      method: input.method,
-      headers: input.headers,
-      body: input.method === "GET" ? undefined : input.body || undefined,
+      method: "GET",
+      headers: {},
       redirect: "manual",
       signal: controller.signal,
     }

@@ -569,7 +569,7 @@ function installSupabaseHarness(options: { enforceIssueVerificationTruth?: boole
   const localStorage = createMemoryStorage()
 
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://maintainflow.supabase.test"
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-test-key"
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "sb_publishable_test_public_key_1234567890"
   delete process.env.NEXT_PUBLIC_MAINTAINFLOW_AUTH_MODE
   localStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify({
     access_token: "access-token",

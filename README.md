@@ -45,7 +45,7 @@ Paid plans include email delivery, webhooks, live evidence links, and PDFs. Agen
 
 Free is browser-only and supports the Lead form template without email proof. Trial signup and any email assertion require Solo, Team, Agency, or the active card-free Team trial.
 
-Each workspace receives one card-free 14-day Team trial, then returns to Free unless a paid or explicit complimentary entitlement applies. Purchasing a subscription does not start another trial.
+Each workspace can explicitly activate one card-free 14-day Team trial. The trial does not start automatically; at expiry the workspace returns to Free unless a paid or explicit complimentary entitlement applies. Purchasing a subscription does not start another trial.
 
 The persisted IDs remain `free`, `starter`, `growth`, `scale`, and `agency_plus` during migration. New-contract labels map `starter -> Solo`, `growth -> Team`, and `scale -> Agency`. Existing paid subscriptions remain on their legacy price and limits until explicitly migrated.
 

@@ -39,6 +39,7 @@ import {
 import { sanitizeStoredWorkflowHeaders, storedWorkflowHeaders } from "./workflow-auth.ts"
 import { getBillingPlan } from "../billing/plans.ts"
 import { getEffectiveBillingPlan } from "../billing/entitlements.ts"
+import { CORE_DB_KEY } from "../browser-storage-keys.ts"
 import type {
   ActivationChecklist,
   Agency,
@@ -58,7 +59,9 @@ import type {
   AssertionConfig,
 } from "./types.ts"
 
-export const CORE_DB_KEY = "maintain-flow-core-db"
+export { CORE_DB_KEY }
+
+export type CoreDatabaseStorageScope = "local" | "session"
 
 type UserLike = {
   id: string
@@ -104,27 +107,38 @@ export function emptyCoreDatabase(): CoreDatabase {
   }
 }
 
-export function readCoreDatabase(): CoreDatabase {
+export function readCoreDatabase(storageScope: CoreDatabaseStorageScope = "local"): CoreDatabase {
   if (typeof window === "undefined") {
     return emptyCoreDatabase()
   }
 
   try {
-    const raw = window.localStorage.getItem(CORE_DB_KEY)
+    const storage = coreDatabaseStorage(storageScope)
+    const raw = storage.getItem(CORE_DB_KEY)
     if (!raw) return emptyCoreDatabase()
     const parsed = { ...emptyCoreDatabase(), ...JSON.parse(raw) } as CoreDatabase
     const safeDatabase = persistenceSafeCoreDatabase(parsed)
-    window.localStorage.setItem(CORE_DB_KEY, JSON.stringify(safeDatabase))
+    storage.setItem(CORE_DB_KEY, JSON.stringify(safeDatabase))
     return serviceIssuedAssuranceView(safeDatabase)
   } catch {
     return emptyCoreDatabase()
   }
 }
 
-export function writeCoreDatabase(database: CoreDatabase) {
+export function writeCoreDatabase(database: CoreDatabase, storageScope: CoreDatabaseStorageScope = "local") {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(CORE_DB_KEY, JSON.stringify(persistenceSafeCoreDatabase(database)))
+    coreDatabaseStorage(storageScope).setItem(CORE_DB_KEY, JSON.stringify(persistenceSafeCoreDatabase(database)))
   }
+}
+
+export function clearCoreDatabase(storageScope: CoreDatabaseStorageScope = "local") {
+  if (typeof window !== "undefined") {
+    coreDatabaseStorage(storageScope).removeItem(CORE_DB_KEY)
+  }
+}
+
+function coreDatabaseStorage(storageScope: CoreDatabaseStorageScope): Storage {
+  return storageScope === "session" ? window.sessionStorage : window.localStorage
 }
 
 function persistenceSafeCoreDatabase(database: CoreDatabase): CoreDatabase {

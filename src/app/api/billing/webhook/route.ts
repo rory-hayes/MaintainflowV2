@@ -3,21 +3,18 @@ import { NextRequest, NextResponse } from "next/server"
 import {
   getStripeWebhookSecret,
   retrieveStripeSubscription,
-  resolveStripeSubscriptionPlanId,
   verifyStripeWebhookSignature,
 } from "@/lib/billing/stripe"
 import { businessEvalsBillingContractVersion, isBillingPlanId } from "@/lib/billing/plans"
+import { safeServerLog } from "@/lib/observability/safe-server-log"
+import { finishStripeCheckoutSession } from "@/lib/billing/stripe-checkout-sessions.server"
+import { reconcileStripeSubscriptionSnapshot } from "@/lib/billing/stripe-subscription-reconciliation.server"
 import {
   claimStripeWebhookReceipt,
   finishStripeWebhookReceipt,
   type StripeWebhookReceiptClaim,
 } from "@/lib/billing/stripe-webhook-receipts.server"
 import {
-  entitledPlanForStripeStatus,
-  normalizeStripeSubscriptionStatus,
-} from "@/lib/billing/entitlements"
-import {
-  loadAgencyBillingContractVersionByStripeReference,
   updateAgencyBilling,
   updateAgencyBillingByStripeReference,
 } from "@/lib/billing/workspace.server"
@@ -55,7 +52,7 @@ export async function POST(request: NextRequest) {
   const webhookSecret = getStripeWebhookSecret()
 
   if (!webhookSecret) {
-    console.error("Stripe webhook is unavailable because its signing secret is not configured.")
+    safeServerLog("error", "stripe-webhook-not-configured")
     return new NextResponse("Stripe webhook is not configured.", { status: 503 })
   }
 
@@ -65,10 +62,8 @@ export async function POST(request: NextRequest) {
       signatureHeader: request.headers.get("stripe-signature"),
       secret: webhookSecret,
     })
-  } catch (error) {
-    console.warn("Stripe webhook signature validation failed.", {
-      reason: error instanceof Error ? error.message : "unknown",
-    })
+  } catch {
+    safeServerLog("warn", "stripe-webhook-signature-rejected")
     return new NextResponse("Invalid Stripe webhook signature.", { status: 400 })
   }
 
@@ -87,11 +82,10 @@ export async function POST(request: NextRequest) {
       eventType: event.type,
       rawPayload: payload,
     })
-  } catch (error) {
-    console.error("Stripe webhook receipt claim failed.", {
+  } catch {
+    safeServerLog("error", "stripe-webhook-receipt-failure", {
       eventId: event.id,
       eventType: event.type,
-      reason: error instanceof Error ? error.message : "unknown",
     })
     return NextResponse.json(
       { error: "Stripe webhook receipt could not be claimed.", reference: event.id },
@@ -131,12 +125,11 @@ export async function POST(request: NextRequest) {
 
     await finishStripeWebhookReceipt(receipt, true)
     return NextResponse.json({ received: true, duplicate: false })
-  } catch (error) {
+  } catch {
     await finishStripeWebhookReceipt(receipt, false).catch(() => undefined)
-    console.error("Stripe webhook processing failed.", {
+    safeServerLog("error", "stripe-webhook-processing-failure", {
       eventId: event.id,
       eventType: event.type,
-      reason: error instanceof Error ? error.message : "unknown",
     })
     return NextResponse.json(
       { error: "Stripe webhook could not be processed.", reference: event.id },
@@ -165,58 +158,19 @@ async function handleCheckoutCompleted(session: StripeObject) {
 
   if (subscriptionId) {
     await handleSubscriptionUpdated(await currentSubscription({ id: subscriptionId }))
+    const stripeSessionId = valueOrEmpty(session.id)
+    if (stripeSessionId) {
+      await finishStripeCheckoutSession({
+        agencyId,
+        stripeSessionId,
+        status: "complete",
+      })
+    }
   }
 }
 
 async function handleSubscriptionUpdated(subscription: StripeObject) {
-  const subscriptionId = valueOrEmpty(subscription.id)
-  const customerId = valueOrEmpty(subscription.customer)
-  const agencyId = valueOrEmpty(subscription.metadata?.maintainflow_agency_id)
-  const metadataPlan = subscription.metadata?.maintainflow_plan
-  const subscriptionBillingContract = subscription.metadata?.maintainflow_billing_contract
-  const storedBillingContract = await loadAgencyBillingContractVersionByStripeReference({
-    agencyId,
-    customerId,
-    subscriptionId,
-  })
-  const effectiveBillingContract = storedBillingContract === businessEvalsBillingContractVersion
-    || subscriptionBillingContract === businessEvalsBillingContractVersion
-    ? businessEvalsBillingContractVersion
-    : storedBillingContract ?? subscriptionBillingContract
-  const plan = resolveStripeSubscriptionPlanId({
-    priceId: subscription.items?.data?.[0]?.price?.id,
-    metadataPlan,
-    billingContractVersion: effectiveBillingContract,
-  })
-  const stripeSubscriptionStatus = normalizeStripeSubscriptionStatus(subscription.status)
-  const entitledPlan = plan
-    ? entitledPlanForStripeStatus(plan, stripeSubscriptionStatus)
-    : "free"
-  const trialEndsAt = stripeTimestampToIso(subscription.trial_end)
-  const billingContractVersion = subscriptionBillingContract === businessEvalsBillingContractVersion
-    ? businessEvalsBillingContractVersion
-    : undefined
-
-  if (agencyId) {
-    await updateAgencyBilling(agencyId, {
-      plan: entitledPlan,
-      stripeCustomerId: customerId || undefined,
-      stripeSubscriptionId: subscriptionId || undefined,
-      stripeSubscriptionStatus: stripeSubscriptionStatus || null,
-      trialEndsAt,
-      billingContractVersion,
-    })
-    return
-  }
-
-  await updateAgencyBillingByStripeReference({
-    subscriptionId,
-    customerId,
-    plan: entitledPlan,
-    trialEndsAt,
-    stripeSubscriptionStatus: stripeSubscriptionStatus || null,
-    billingContractVersion,
-  })
+  await reconcileStripeSubscriptionSnapshot(subscription)
 }
 
 async function handleSubscriptionDeleted(subscription: StripeObject) {
@@ -240,8 +194,4 @@ async function currentSubscription(subscription: StripeObject): Promise<StripeOb
     throw new Error("Stripe subscription identity is missing.")
   }
   return retrieveStripeSubscription(subscriptionId)
-}
-
-function stripeTimestampToIso(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? new Date(value * 1000).toISOString() : null
 }

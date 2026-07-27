@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import test from "node:test"
 
 import { preserveValidDatabaseTimestamp } from "../src/lib/core/database-timestamp.ts"
+import { runEndpointTest } from "../src/lib/core/check-runner.ts"
 import { endpointInputFromSavedCheck } from "../src/lib/core/saved-check-config.ts"
 import {
   createAgencyWorkspace,
@@ -138,4 +139,46 @@ test("persisted evidence ignores browser-supplied endpoint results and reruns sa
   assert.match(hook, /recordedResult = await runPersistedCheck\(createdCheck\.id\)/)
   assert.match(hook, /const stagedLocalDatabase = createWorkflowReadyForFirstRun/)
   assert.match(hook, /await runPersistedCheck\(check\.id\)/)
+})
+
+test("transient endpoint execution is authenticated before parsing and remains GET-only", async () => {
+  const route = readFileSync("src/app/api/checks/test/route.ts", "utf8")
+  const authIndex = route.indexOf("await endpointTestAuth(request)")
+  const bodyIndex = route.indexOf("await readBoundedJson(request")
+
+  assert.ok(authIndex >= 0 && bodyIndex > authIndex)
+  assert.doesNotMatch(route, /new Set\(\["GET", "POST"/)
+
+  await assert.rejects(() => runEndpointTest({
+    url: "https://api.example.test/health",
+    method: "POST",
+    headers: {},
+    body: "",
+    expectedStatus: 200,
+    timeoutSeconds: 10,
+    maxLatencyMs: 5_000,
+    assertions: [],
+  }), /GET requests only/)
+
+  await assert.rejects(() => runEndpointTest({
+    url: "https://api.example.test/health",
+    method: "GET",
+    headers: { Authorization: "Bearer secret" },
+    body: "",
+    expectedStatus: 200,
+    timeoutSeconds: 10,
+    maxLatencyMs: 5_000,
+    assertions: [],
+  }), /custom headers/)
+
+  await assert.rejects(() => runEndpointTest({
+    url: "https://api.example.test/health",
+    method: "GET",
+    headers: {},
+    body: "side-effect=true",
+    expectedStatus: 200,
+    timeoutSeconds: 10,
+    maxLatencyMs: 5_000,
+    assertions: [],
+  }), /request bodies/)
 })

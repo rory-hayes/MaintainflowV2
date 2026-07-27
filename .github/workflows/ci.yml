@@ -36,12 +36,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
         with:
           persist-credentials: false
 
       - name: Use Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24.13.0
           package-manager-cache: false
@@ -70,7 +70,7 @@ jobs:
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Test Business Evals journeys
+      - name: Test Business Evals preview interactions
         run: pnpm test:business-evals:e2e
 
       - name: Build canary route tree
@@ -79,3 +79,184 @@ jobs:
           BUSINESS_EVALS_WORKSPACE_ALLOWLIST: "00000000-0000-4000-8000-000000000099"
           BUSINESS_EVALS_PREVIEW: "0"
         run: pnpm build
+
+  browser-egress-source:
+    name: Browser egress / source and policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+    defaults:
+      run:
+        working-directory: infra/browser-egress-proxy
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Use the exact Go image-builder version
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: infra/browser-egress-proxy/go.sum
+
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            printf 'The following Go files need gofmt:\n%s\n' "${unformatted}" >&2
+            exit 1
+          fi
+
+      - name: Verify Go dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Test Go policy with the race detector
+        run: go test -race ./...
+
+      - name: Vet Go policy
+        run: go vet ./...
+
+      - name: Verify pinned IANA policy generation
+        run: go run ./cmd/generate-iana -root . -check
+
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.13.11"
+          enable-cache: true
+          cache-dependency-glob: |
+            infra/browser-egress-proxy/interceptor/uv.lock
+            infra/browser-egress-proxy/interceptor/*-requirements.lock
+
+      - name: Sync the locked interceptor test environment
+        working-directory: infra/browser-egress-proxy/interceptor
+        run: |
+          uv sync --frozen --python 3.13.11
+          uv pip install \
+            --python .venv/bin/python \
+            --require-hashes \
+            --requirement build-requirements.lock
+          uv pip install \
+            --python .venv/bin/python \
+            --no-deps \
+            --require-hashes \
+            --requirement source-test-requirements.lock
+
+      - name: Build, source-test, and reproduce the patched runtime wheels
+        working-directory: infra/browser-egress-proxy/interceptor
+        shell: bash
+        run: |
+          wheel_dir="${RUNNER_TEMP}/maintainflow-patched-wheels"
+          rebuild_dir="${RUNNER_TEMP}/maintainflow-patched-wheels-rebuild"
+          mkdir --parents "${wheel_dir}" "${rebuild_dir}"
+          .venv/bin/python build_patched_wheels.py --test --output "${wheel_dir}"
+          .venv/bin/python build_patched_wheels.py --output "${rebuild_dir}"
+          diff --recursive --brief "${wheel_dir}" "${rebuild_dir}"
+
+      - name: Test the complete interceptor policy against patched wheels
+        working-directory: infra/browser-egress-proxy/interceptor
+        shell: bash
+        run: |
+          wheel_dir="${RUNNER_TEMP}/maintainflow-patched-wheels"
+          uv pip install \
+            --python .venv/bin/python \
+            --no-deps \
+            --reinstall \
+            "${wheel_dir}"/h11-0.16.0-*.whl \
+            "${wheel_dir}"/mitmproxy-12.2.3-*.whl
+          .venv/bin/python post_image_verify.py --manifest pinned-source.json
+          .venv/bin/python -m pytest -q tests/test_maintainflow_policy.py
+
+      - name: Verify deployment scaffold
+        run: |
+          interceptor/.venv/bin/python deploy/verify_scaffold.py
+          interceptor/.venv/bin/python -m unittest discover -s deploy/tests -v
+
+  browser-egress-images:
+    name: Browser egress / ${{ matrix.component }} image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: dialer
+            dockerfile: infra/browser-egress-proxy/deploy/images/Dockerfile.dialer
+            image: maintainflow/browser-egress-dialer:ci
+          - component: interceptor
+            dockerfile: infra/browser-egress-proxy/deploy/images/Dockerfile.interceptor
+            image: maintainflow/browser-egress-interceptor:ci
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build ${{ matrix.component }} image
+        shell: bash
+        run: |
+          git archive --format=tar HEAD | docker build \
+            --file "${{ matrix.dockerfile }}" \
+            --tag "${{ matrix.image }}" \
+            -
+
+      - name: Create ${{ matrix.component }} SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ matrix.image }}
+          format: spdx-json
+          syft-version: v1.48.0
+          artifact-name: browser-egress-${{ matrix.component }}-sbom
+          output-file: browser-egress-${{ matrix.component }}.spdx.json
+          dependency-snapshot: false
+          upload-artifact: true
+          upload-artifact-retention: 30
+          upload-release-assets: false
+
+      - name: Scan ${{ matrix.component }} image for high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}
+          version: v0.70.0
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+          format: json
+          output: browser-egress-${{ matrix.component }}-vulnerabilities.json
+          timeout: 15m
+
+      - name: Preserve the complete ${{ matrix.component }} vulnerability report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-egress-${{ matrix.component }}-vulnerabilities
+          path: browser-egress-${{ matrix.component }}-vulnerabilities.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Block fixable ${{ matrix.component }} high-severity vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}
+          version: v0.70.0
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          # Debian can temporarily classify CVEs as affected/fix-deferred with
+          # no installable package. The gate fails as soon as a fixed version
+          # exists, while the reviewed baseline stays explicit in-repo.
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          timeout: 15m

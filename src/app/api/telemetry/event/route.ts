@@ -1,4 +1,5 @@
 import { normalizeProductEvent } from "@/lib/analytics/product-events.shared"
+import { BoundedJsonRequestError, readBoundedJson } from "@/lib/http/bounded-json.server"
 import { bearerToken } from "@/lib/supabase/report-download.server"
 import { supabaseServiceJson } from "@/lib/supabase/server"
 import { getSupabaseUserAuthConfig, verifySupabaseAccessToken } from "@/lib/supabase/user-auth"
@@ -33,7 +34,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const input = normalizeProductEvent(await request.json().catch(() => ({})))
+    const input = normalizeProductEvent(await readBoundedJson(request, 16_384))
     if (!input.eventName) {
       return NextResponse.json({ ok: false, error: "Unknown analytics event." }, { status: 400 })
     }
@@ -59,7 +60,7 @@ export async function POST(request: NextRequest) {
         ok: false,
         error: error instanceof Error ? error.message : "Analytics event could not be stored.",
       },
-      { status: 202 }
+      { status: error instanceof BoundedJsonRequestError ? error.status : 202 }
     )
   }
 }
